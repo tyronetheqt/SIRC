@@ -1,11 +1,21 @@
-#include "../common.h" // Assuming common.h will be reverted too
+#include "../common.h"
 #include "server.h"
 
 static auto serverStartTime = std::chrono::steady_clock::now();
 
-// Reverted to std::string for username
 std::map<SOCKET, std::pair<std::string, std::shared_ptr<SimpleAES>>> onlineUsers;
 std::mutex onlineUsers_mutex;
+
+struct Channel {
+    std::string name;
+    std::map<SOCKET, std::string> members;
+    std::mutex mutex;
+
+    Channel(std::string n) : name(std::move(n)) {}
+};
+
+std::map<std::string, std::shared_ptr<Channel>> channels;
+std::mutex channels_mutex;
 
 CryptoPP::RSA::PrivateKey rsaPrivateKey;
 CryptoPP::RSA::PublicKey rsaPublicKey;
@@ -13,29 +23,73 @@ CryptoPP::RSA::PublicKey rsaPublicKey;
 void generateRSAKeys()
 {
     CryptoPP::AutoSeededRandomPool rng;
-    rsaPrivateKey.GenerateRandomWithKeySize(rng, 2048); // Generate a 2048-bit key
+    rsaPrivateKey.GenerateRandomWithKeySize(rng, 2048);
     rsaPublicKey = CryptoPP::RSA::PublicKey(rsaPrivateKey);
 
     std::cout << "Server: RSA keys generated. Public key modulus size: "
         << rsaPublicKey.GetModulus().ByteCount() * 8 << " bits.\n";
 }
 
+void sendMessageToClient(SOCKET clientSocket, const std::string& message) {
+    std::shared_ptr<SimpleAES> clientAesCipher;
+    {
+        std::lock_guard<std::mutex> lock(onlineUsers_mutex);
+        auto it = onlineUsers.find(clientSocket);
+        if (it != onlineUsers.end()) {
+            clientAesCipher = it->second.second;
+        }
+    }
+
+    if (clientAesCipher) {
+        try {
+            std::vector<unsigned char> responseBytes(message.begin(), message.end());
+            std::vector<unsigned char> encryptedResponse = clientAesCipher->encrypt(responseBytes);
+            if (!send_message_with_length(clientSocket, encryptedResponse)) {
+                std::lock_guard<std::mutex> lock(console_mutex);
+                std::cerr << "Server: Error sending message to socket " << clientSocket << ". Error Code: " << WSAGetLastError() << "\n";
+            }
+        }
+        catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lock(console_mutex);
+            std::cerr << "Server: Exception encrypting/sending message to socket " << clientSocket << ": " << e.what() << "\n";
+        }
+    }
+}
+
+void broadcastToChannel(const std::string& channelName, const std::string& message, SOCKET senderSocket = INVALID_SOCKET) {
+    std::shared_ptr<Channel> targetChannel;
+    {
+        // Acquire channels_mutex to safely get a shared_ptr to the channel
+        std::lock_guard<std::mutex> lock(channels_mutex);
+        auto it = channels.find(channelName);
+        if (it != channels.end()) {
+            targetChannel = it->second;
+        }
+    }
+
+    if (targetChannel) {
+        // Now acquire the specific channel's mutex to iterate its members
+        std::lock_guard<std::mutex> channelLock(targetChannel->mutex);
+        for (const auto& memberPair : targetChannel->members) {
+            if (memberPair.first != senderSocket) {
+                sendMessageToClient(memberPair.first, message);
+            }
+        }
+    }
+}
+
 void handleClient(SOCKET clientSocket) {
-    // clientUsername will now be stored and processed as std::string
     std::string clientUsername = "Unknown";
     bool client_setup_successful = false;
+    std::vector<std::string> joinedChannels; // Keep track of channels this specific client is in
 
-    CryptoPP::AutoSeededRandomPool rng; // RNG for this thread's crypto operations
+    CryptoPP::AutoSeededRandomPool rng;
 
     // --- Send Server's RSA Public Key ---
     std::string encodedPubKey;
     CryptoPP::Base64Encoder encoder(new CryptoPP::StringSink(encodedPubKey), false /*no newlines*/);
     rsaPublicKey.DEREncode(encoder);
     encoder.MessageEnd();
-
-    std::cout << "Server: Sending public key of size: " << encodedPubKey.size() << " bytes.\n";
-    std::cout << "Server: Public Key (Base64 preview, first 100 chars): "
-        << encodedPubKey.substr(0, std::min((size_t)100, encodedPubKey.length())) << "...\n";
 
     size_t totalSent = 0;
     size_t remaining = encodedPubKey.size();
@@ -52,15 +106,6 @@ void handleClient(SOCKET clientSocket) {
         remaining -= sent;
     }
 
-    if (totalSent != encodedPubKey.size()) {
-        std::cerr << "Server: WARNING: Incomplete public key sent! Expected " << encodedPubKey.size()
-            << ", sent " << totalSent << ".\n";
-        closesocket(clientSocket);
-        return;
-    }
-    std::cout << "Server: Public key sent successfully (" << totalSent << " bytes).\n";
-
-
     // --- Receive Encrypted AES Key ---
     std::vector<unsigned char> encryptedAESKeyVec = recv_message_with_length(clientSocket);
     if (encryptedAESKeyVec.empty()) {
@@ -69,9 +114,8 @@ void handleClient(SOCKET clientSocket) {
         return;
     }
     std::string encryptedAESKeyStr(encryptedAESKeyVec.begin(), encryptedAESKeyVec.end());
-    std::cout << "Server: Received " << encryptedAESKeyVec.size() << " bytes for encrypted AES key (via length prefix).\n";
 
-    // 3. Decrypt AES key with private RSA key
+    // Decrypt AES key with private RSA key
     std::string decryptedAESKey;
     try {
         CryptoPP::RSAES_OAEP_SHA_Decryptor decryptor(rsaPrivateKey);
@@ -88,14 +132,12 @@ void handleClient(SOCKET clientSocket) {
         CryptoPP::StringSource ss(encryptedAESKeyStr, true,
             new CryptoPP::PK_DecryptorFilter(rng_local, decryptor,
                 new CryptoPP::StringSink(decryptedAESKey)));
-        std::cout << "Server: AES key decrypted successfully. Decrypted size: " << decryptedAESKey.size() << " bytes.\n";
 
         if (decryptedAESKey.size() != 32) { // AES-256 key size
             std::cerr << "Server: Warning: Decrypted AES key has unexpected size: " << decryptedAESKey.size() << " bytes. Expected 32 for AES-256.\n";
             closesocket(clientSocket);
             return;
         }
-
     }
     catch (const CryptoPP::Exception& e) {
         std::cerr << "Server: Crypto++ Exception during AES key decryption: " << e.what() << "\n";
@@ -113,11 +155,10 @@ void handleClient(SOCKET clientSocket) {
         return;
     }
 
-    // 4. Initialize AES cipher with decrypted key
+    // Initialize AES cipher with decrypted key
     std::shared_ptr<SimpleAES> clientAesCipher;
     try {
         clientAesCipher = std::make_shared<SimpleAES>(std::vector<unsigned char>(decryptedAESKey.begin(), decryptedAESKey.end()));
-        std::cout << "Server: SimpleAES (GCM) cipher initialized with negotiated key for this client.\n";
     }
     catch (const std::exception& e) {
         std::cerr << "Server: Error initializing SimpleAES (GCM) for client: " << e.what() << "\n";
@@ -146,7 +187,7 @@ void handleClient(SOCKET clientSocket) {
         }
 
         // --- Send Welcome Message ---
-        std::string ackMessage = "Welcome, " + clientUsername + "!"; // Construct as std::string
+        std::string ackMessage = "Welcome, " + clientUsername + "! Type /CMDS for commands. Join a channel with /JOIN <channel_name>."; // Construct as std::string
         std::vector<unsigned char> ackBytes(ackMessage.begin(), ackMessage.end());
         // Encrypt std::string bytes
         std::vector<unsigned char> encryptedAck = clientAesCipher->encrypt(ackBytes);
@@ -281,6 +322,11 @@ void handleClient(SOCKET clientSocket) {
                     responseMessage += "- UPTIME: Get server uptime\n";
                     responseMessage += "- ONLINE / USERS: List current online users\n";
                     responseMessage += "- MSG <username> <message>: Send a private message to a user\n";
+                    responseMessage += "- JOIN <channel_name>: Join or create a channel\n";
+                    responseMessage += "- LEAVE [<channel_name>]: Leave a specific channel, or all if none specified\n";
+                    responseMessage += "- LIST: List all active channels\n";
+                    responseMessage += "- WHO <channel_name>: List users in a channel\n";
+                    responseMessage += "- MSG #<channel_name> <message>: Send a message to a channel\n";
                     responseMessage += "- CMDS / COMMANDS: List all commands";
                 }
                 else if (processedCommand == "ONLINE" || processedCommand == "USERS") {
@@ -299,13 +345,58 @@ void handleClient(SOCKET clientSocket) {
                     }
                     responseMessage = userListString;
                 }
+                else if (processedCommand.rfind("MSG #", 0) == 0) {
+                    std::string fullMsgArgs = decryptedCommand.substr(processedCommand.find("MSG #") + 5);
+                    size_t firstSpace = fullMsgArgs.find(' ');
+
+                    if (firstSpace == std::string::npos || firstSpace == 0 || firstSpace == fullMsgArgs.length() - 1) {
+                        responseMessage = "Error: Invalid channel message format. Usage: MSG #<channel_name> <message>";
+                    }
+                    else {
+                        std::string targetChannelName = fullMsgArgs.substr(0, firstSpace);
+                        std::string messageContent = fullMsgArgs.substr(firstSpace + 1);
+
+                        // Convert to lowercase for consistent lookup
+                        std::transform(targetChannelName.begin(), targetChannelName.end(), targetChannelName.begin(),
+                            [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
+
+                        std::shared_ptr<Channel> targetChannel;
+                        {
+                            std::lock_guard<std::mutex> lock(channels_mutex);
+                            auto it = channels.find(targetChannelName);
+                            if (it != channels.end()) {
+                                targetChannel = it->second;
+                            }
+                        }
+
+                        if (targetChannel) {
+                            bool isMember = false;
+                            {
+                                std::lock_guard<std::mutex> channelLock(targetChannel->mutex);
+                                isMember = targetChannel->members.count(clientSocket);
+                            }
+
+                            if (isMember) {
+                                std::string fullChannelMessage = "[" + targetChannelName + "] <" + clientUsername + ">: " + messageContent;
+                                broadcastToChannel(targetChannelName, fullChannelMessage, clientSocket);
+                                responseMessage = "Message sent to channel #" + targetChannelName + ".";
+                            }
+                            else {
+                                responseMessage = "Error: You are not a member of channel #" + targetChannelName + ". Join it first with /JOIN " + targetChannelName;
+                            }
+                        }
+                        else {
+                            responseMessage = "Error: Channel #" + targetChannelName + " does not exist.";
+                        }
+                    }
+                }
                 else if (processedCommand.rfind("MSG ", 0) == 0) {
                     // Parse arguments from the original (case-sensitive) decryptedCommand
                     std::string fullMsgArgs = decryptedCommand.substr(processedCommand.find("MSG ") + 4);
                     size_t firstSpace = fullMsgArgs.find(' ');
 
                     if (firstSpace == std::string::npos || firstSpace == 0 || firstSpace == fullMsgArgs.length() - 1) {
-                        responseMessage = "Error: Invalid message format. Usage: MSG <username> <message>";
+                        responseMessage = "Error: Invalid private message format. Usage: MSG <username> <message>";
                     }
                     else {
                         std::string targetUsername = fullMsgArgs.substr(0, firstSpace);
@@ -361,6 +452,208 @@ void handleClient(SOCKET clientSocket) {
                         responseMessage = senderResponseMessage; // This response goes back to the SENDER of the MSG command
                     }
                 }
+                else if (processedCommand.rfind("JOIN ", 0) == 0 && processedCommand.length() > 5) {
+                    std::string channelName = decryptedCommand.substr(processedCommand.find("JOIN ") + 5);
+
+                    if (channelName.empty() || channelName.find('#') != std::string::npos || channelName.find(' ') != std::string::npos) {
+                        responseMessage = "Error: Invalid channel name. Channel names cannot contain '#' or spaces.";
+                    }
+                    else {
+                        // Convert to lowercase for consistent lookup and storage
+                        std::transform(channelName.begin(), channelName.end(), channelName.begin(),
+                            [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
+
+                        std::shared_ptr<Channel> channel;
+                        bool newChannelCreated = false;
+                        std::string joinBroadcastMessage;
+
+                        {
+                            std::lock_guard<std::mutex> lock(channels_mutex); // Lock for channels map
+                            auto it = channels.find(channelName);
+                            if (it == channels.end()) {
+                                channel = std::make_shared<Channel>(channelName);
+                                channels[channelName] = channel;
+                                newChannelCreated = true;
+                            }
+                            else {
+                                channel = it->second;
+                            }
+                        }
+
+                        {
+                            std::lock_guard<std::mutex> channelLock(channel->mutex); // Lock for specific channel members
+                            if (channel->members.count(clientSocket) == 0) {
+                                channel->members[clientSocket] = clientUsername;
+                                joinedChannels.push_back(channelName); // Add to client's list of joined channels
+                                responseMessage = "Joined channel #" + channelName + ".";
+                                joinBroadcastMessage = clientUsername + " has joined #" + channelName + ".";
+                            }
+                            else {
+                                responseMessage = "You are already in channel #" + channelName + ".";
+                            }
+                        } // channelLock releases here
+
+                        // Broadcast outside of the specific channel's mutex if a message is to be sent
+                        if (!joinBroadcastMessage.empty()) {
+                            broadcastToChannel(channelName, joinBroadcastMessage, clientSocket);
+                        }
+                        if (newChannelCreated) {
+                            std::lock_guard<std::mutex> lock(console_mutex);
+                            std::cout << "Server: Channel #" << channelName << " created.\n";
+                        }
+                    }
+                }
+                else if (processedCommand.rfind("LEAVE", 0) == 0) {
+                    std::string channelNameArg = decryptedCommand.substr(processedCommand.find("LEAVE") + 5);
+                    if (!channelNameArg.empty() && channelNameArg[0] == ' ') {
+                        channelNameArg = channelNameArg.substr(1);
+                        std::transform(channelNameArg.begin(), channelNameArg.end(), channelNameArg.begin(),
+                            [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
+                    }
+
+                    if (channelNameArg.empty()) { // Leave all channels
+                        if (joinedChannels.empty()) {
+                            responseMessage = "You are not in any channels to leave.";
+                        }
+                        else {
+                            std::string leaveConfirmation = "Left channels: ";
+                            std::vector<std::string> channelsToCleanUp; // Channels that might become empty
+
+                            for (const std::string& channelToLeave : joinedChannels) {
+                                std::shared_ptr<Channel> channel;
+                                {
+                                    std::lock_guard<std::mutex> lock(channels_mutex);
+                                    auto it = channels.find(channelToLeave);
+                                    if (it != channels.end()) {
+                                        channel = it->second;
+                                    }
+                                }
+
+                                if (channel) {
+                                    std::string leaveBroadcastMessage = clientUsername + " has left #" + channelToLeave + ".";
+                                    bool channelBecameEmpty = false;
+                                    {
+                                        std::lock_guard<std::mutex> channelLock(channel->mutex);
+                                        channel->members.erase(clientSocket);
+                                        if (channel->members.empty()) {
+                                            channelBecameEmpty = true;
+                                        }
+                                    } // channelLock releases here
+
+                                    broadcastToChannel(channelToLeave, leaveBroadcastMessage, clientSocket);
+
+                                    if (channelBecameEmpty) {
+                                        channelsToCleanUp.push_back(channelToLeave);
+                                    }
+                                    leaveConfirmation += "#" + channelToLeave + " ";
+                                }
+                            }
+
+                            {
+                                // Clean up empty channels after all broadcasts are done
+                                std::lock_guard<std::mutex> lock(channels_mutex);
+                                for (const std::string& emptyChannel : channelsToCleanUp) {
+                                    channels.erase(emptyChannel);
+                                    std::lock_guard<std::mutex> consoleLock(console_mutex);
+                                    std::cout << "Server: Channel #" << emptyChannel << " is now empty and removed.\n";
+                                }
+                            }
+                            joinedChannels.clear();
+                            responseMessage = leaveConfirmation;
+                        }
+                    }
+                    else { // Leave a specific channel
+                        auto it = std::find(joinedChannels.begin(), joinedChannels.end(), channelNameArg);
+                        if (it != joinedChannels.end()) {
+                            std::shared_ptr<Channel> channel;
+                            {
+                                std::lock_guard<std::mutex> lock(channels_mutex);
+                                auto channel_it = channels.find(channelNameArg);
+                                if (channel_it != channels.end()) {
+                                    channel = channel_it->second;
+                                }
+                            }
+
+                            if (channel) {
+                                std::string leaveBroadcastMessage = clientUsername + " has left #" + channelNameArg + ".";
+                                bool channelBecameEmpty = false;
+                                {
+                                    std::lock_guard<std::mutex> channelLock(channel->mutex);
+                                    channel->members.erase(clientSocket);
+                                    if (channel->members.empty()) {
+                                        channelBecameEmpty = true;
+                                    }
+                                } // channelLock releases here
+
+                                broadcastToChannel(channelNameArg, leaveBroadcastMessage, clientSocket);
+
+                                if (channelBecameEmpty) {
+                                    std::lock_guard<std::mutex> lock(channels_mutex);
+                                    channels.erase(channelNameArg);
+                                    std::lock_guard<std::mutex> consoleLock(console_mutex);
+                                    std::cout << "Server: Channel #" << channelNameArg << " is now empty and removed.\n";
+                                }
+                                joinedChannels.erase(it);
+                                responseMessage = "Left channel #" + channelNameArg + ".";
+                            }
+                            else {
+                                responseMessage = "Error: Channel #" + channelNameArg + " not found (internal error).";
+                            }
+                        }
+                        else {
+                            responseMessage = "Error: You are not in channel #" + channelNameArg + ".";
+                        }
+                    }
+                }
+                else if (processedCommand == "LIST") {
+                    std::lock_guard<std::mutex> lock(channels_mutex);
+                    if (channels.empty()) {
+                        responseMessage = "No active channels.";
+                    }
+                    else {
+                        responseMessage = "--- Active Channels ---\n";
+                        for (const auto& pair : channels) {
+                            std::lock_guard<std::mutex> channelLock(pair.second->mutex); // Lock each channel to get member count
+                            responseMessage += "#" + pair.first + " (" + std::to_string(pair.second->members.size()) + " users)\n";
+                        }
+                        if (responseMessage.back() == '\n') {
+                            responseMessage.pop_back();
+                        }
+                    }
+                }
+                else if (processedCommand.rfind("WHO ", 0) == 0 && processedCommand.length() > 4) {
+                    std::string channelName = decryptedCommand.substr(processedCommand.find("WHO ") + 4);
+                    std::transform(channelName.begin(), channelName.end(), channelName.begin(),
+                        [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
+
+                    std::shared_ptr<Channel> targetChannel;
+                    {
+                        std::lock_guard<std::mutex> lock(channels_mutex);
+                        auto it = channels.find(channelName);
+                        if (it != channels.end()) {
+                            targetChannel = it->second;
+                        }
+                    }
+
+                    if (targetChannel) {
+                        std::lock_guard<std::mutex> channelLock(targetChannel->mutex);
+                        if (targetChannel->members.empty()) {
+                            responseMessage = "Channel #" + channelName + " has no members.";
+                        }
+                        else {
+                            responseMessage = "--- Users in #" + channelName + " ---\n";
+                            for (const auto& memberPair : targetChannel->members) {
+                                responseMessage += "- " + memberPair.second + "\n";
+                            }
+                            if (responseMessage.back() == '\n') {
+                                responseMessage.pop_back();
+                            }
+                        }
+                    }
+                    else {
+                        responseMessage = "Error: Channel #" + channelName + " does not exist.";
+                    }
+                }
                 else {
                     responseMessage = "?"; // Unknown command
                 }
@@ -390,6 +683,7 @@ void handleClient(SOCKET clientSocket) {
     }
 
     // --- Client Disconnection Cleanup ---
+    // Remove client from onlineUsers
     if (client_setup_successful) {
         {
             std::lock_guard<std::mutex> lock(onlineUsers_mutex);
@@ -398,6 +692,47 @@ void handleClient(SOCKET clientSocket) {
         {
             std::lock_guard<std::mutex> lock(console_mutex);
             std::cout << "Server: Client '" << clientUsername << "' (Socket: " << clientSocket << ") removed from online users list.\n";
+        }
+    }
+
+    // Client leaving channels cleanup: iterate through channels the client was known to be in
+    // and remove them. Clean up empty channels after.
+    std::vector<std::string> channelsToCleanUp;
+    for (const std::string& channelToLeave : joinedChannels) {
+        std::shared_ptr<Channel> channel;
+        {
+            std::lock_guard<std::mutex> lock(channels_mutex);
+            auto it = channels.find(channelToLeave);
+            if (it != channels.end()) {
+                channel = it->second;
+            }
+        }
+        if (channel) {
+            std::string leaveBroadcastMessage = clientUsername + " has left #" + channelToLeave + ".";
+            bool channelBecameEmpty = false;
+            {
+                std::lock_guard<std::mutex> channelLock(channel->mutex);
+                channel->members.erase(clientSocket);
+                if (channel->members.empty()) {
+                    channelBecameEmpty = true;
+                }
+            } // channelLock released
+
+            broadcastToChannel(channelToLeave, leaveBroadcastMessage, clientSocket);
+
+            if (channelBecameEmpty) {
+                channelsToCleanUp.push_back(channelToLeave);
+            }
+        }
+    }
+
+    {
+        // Clean up empty channels after all broadcasts are done
+        std::lock_guard<std::mutex> lock(channels_mutex);
+        for (const std::string& emptyChannel : channelsToCleanUp) {
+            channels.erase(emptyChannel);
+            std::lock_guard<std::mutex> consoleLock(console_mutex);
+            std::cout << "Server: Channel #" << emptyChannel << " is now empty and removed (during client disconnect).\n";
         }
     }
 

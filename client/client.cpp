@@ -1,17 +1,26 @@
 #include "../common.h"
 #include "client.h"
+#include <thread>
+#include <atomic>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+
+std::atomic<bool> stop_threads(false);
 
 void receiveMessages(SOCKET serverSocket, const SimpleAES& aesCipher) {
-    while (true) {
+    while (!stop_threads) {
         std::vector<unsigned char> encryptedData = recv_message_with_length(serverSocket);
 
         if (encryptedData.empty()) {
-            std::lock_guard<std::mutex> lock(console_mutex);
-            if (WSAGetLastError() == 0) {
-                std::cerr << "\nServer disconnected gracefully.\n" << std::flush;
-            }
-            else {
-                std::cerr << "\nClient: Receive error (in receiveMessages thread): " << WSAGetLastError() << "\n" << std::flush;
+            if (!stop_threads) {
+                std::lock_guard<std::mutex> lock(console_mutex);
+                if (WSAGetLastError() == 0) {
+                    std::cerr << "\nServer disconnected gracefully.\n" << std::flush;
+                }
+                else {
+                    std::cerr << "\nClient: Receive error (in receiveMessages thread): " << WSAGetLastError() << "\n" << std::flush;
+                }
             }
             break;
         }
@@ -23,8 +32,9 @@ void receiveMessages(SOCKET serverSocket, const SimpleAES& aesCipher) {
             {
                 std::lock_guard<std::mutex> lock(incoming_messages_mutex);
                 incoming_messages_queue.push(receivedMessage);
-                incoming_messages_cv.notify_one();
             }
+            incoming_messages_cv.notify_one();
+
         }
         catch (const CryptoPP::Exception& e) {
             std::lock_guard<std::mutex> lock(console_mutex);
@@ -40,14 +50,19 @@ void receiveMessages(SOCKET serverSocket, const SimpleAES& aesCipher) {
 }
 
 void printQueuedMessages() {
-    while (true) {
+    while (!stop_threads) {
         std::unique_lock<std::mutex> lock(incoming_messages_mutex);
-        incoming_messages_cv.wait(lock, [] { return !incoming_messages_queue.empty(); });
+        incoming_messages_cv.wait(lock, [&] { return stop_threads || !incoming_messages_queue.empty(); });
+
+        if (stop_threads && incoming_messages_queue.empty()) {
+            break;
+        }
 
         while (!incoming_messages_queue.empty()) {
             std::string message = incoming_messages_queue.front();
             incoming_messages_queue.pop();
             lock.unlock();
+
             {
                 std::lock_guard<std::mutex> console_lock(console_mutex);
                 std::cout << "\r" << std::string(80, ' ') << "\r";
@@ -262,10 +277,7 @@ int runClient(const std::string& ipAddress, const std::string& port, const std::
     }
 
     std::thread receiverThread(receiveMessages, clientSocket, std::cref(aesCipher));
-    receiverThread.detach();
-
     std::thread printerThread(printQueuedMessages);
-    printerThread.detach();
 
     std::string command;
     while (true) {
@@ -295,6 +307,7 @@ int runClient(const std::string& ipAddress, const std::string& port, const std::
             encryptedCommand = aesCipher.encrypt(std::vector<unsigned char>(command.begin(), command.end()));
         }
         catch (const CryptoPP::Exception& e) {
+            std::lock_guard<std::mutex> lock(console_mutex);
             std::cerr << "Client: Crypto++ Exception while encrypting command: " << e.what() << "\n";
             break;
         }
@@ -304,6 +317,24 @@ int runClient(const std::string& ipAddress, const std::string& port, const std::
             std::cerr << "Client: send error (with length prefix): " << WSAGetLastError() << "\n" << std::flush;
             break;
         }
+    }
+
+    stop_threads = true;
+    incoming_messages_cv.notify_all();
+
+    shutdown(clientSocket, SD_RECEIVE);
+
+    if (receiverThread.joinable()) {
+        receiverThread.join();
+    }
+    if (printerThread.joinable()) {
+        printerThread.join();
+    }
+
+    int iResultShutdown = shutdown(clientSocket, SD_SEND);
+    if (iResultShutdown == SOCKET_ERROR) {
+        std::lock_guard<std::mutex> lock(console_mutex);
+        std::cerr << "Client: shutdown send error: " << WSAGetLastError() << "\n" << std::flush;
     }
 
     closesocket(clientSocket);

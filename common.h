@@ -11,7 +11,7 @@
 
 #include <iostream>
 #include <vector>
-#include <string> // Keep for std::string
+#include <string>
 #include <random>
 #include <algorithm>
 #include <ctime>
@@ -20,25 +20,24 @@
 #include <chrono>
 #include <cctype>
 #include <limits>
-#include <string_view> // Keep if you use string_view elsewhere, but 'port' won't be one
+#include <string_view>
 
 #include <thread>
 #include <mutex>
 #include <map>
 #include <queue>
-#include <condition_variable> // Explicitly include for std::condition_variable
+#include <condition_variable>
 
-// Crypto++ includes (now fully consistent with your setup)
-#include <aes.h>         // AES algorithm
-#include <modes.h>       // Modes of operation (like CBC_Mode; might also define GCM_Mode or GCM)
-#include <filters.h>     // Stream transformation filters
-#include <osrng.h>       // AutoSeededRandomPool for IV generation
-#include <base64.h>      // For RSA key exchange
-#include <rsa.h>         // For RSA
-#include <files.h>       // For key loading/saving if needed
-#include <gcm.h>         // Explicitly include gcm.h - CRITICAL for GCM class definition
-#include <hex.h>         // Potentially useful for debugging
-#include <secblock.h>    // Corrected: For CryptoPP::SecByteBlock
+#include <aes.h>
+#include <modes.h>
+#include <filters.h>
+#include <osrng.h>
+#include <base64.h>
+#include <rsa.h>
+#include <files.h>
+#include <gcm.h>
+#include <hex.h>
+#include <secblock.h>
 
 inline std::mutex console_mutex;
 
@@ -46,44 +45,34 @@ inline std::queue<std::string> incoming_messages_queue;
 inline std::mutex incoming_messages_mutex;
 inline std::condition_variable incoming_messages_cv;
 
-// --- REINSTATED 'port' as const std::string ---
-constexpr std::string port_str = "12345"; // Helper string if needed for string_view
-const std::string port = "12345"; // Reverted to const std::string for compatibility with existing functions
+constexpr std::string port_str = "12345";
+const std::string port = "12345";
 
-constexpr size_t BUF_SIZE = 4096; // Consistent type with std::min
+constexpr size_t BUF_SIZE = 4096;
 
-// Max message size to prevent allocation attacks for incoming data
-constexpr uint32_t MAX_MESSAGE_SIZE = 10 * 1024 * 1024; // 10 MB limit, adjust as needed
+constexpr uint32_t MAX_MESSAGE_SIZE = 10 * 1024 * 1024;
 
 #pragma comment(lib, "Ws2_32.lib")
 
-// Define the GCM Tag size (standard is 16 bytes for AES-GCM)
-const int GCM_TAG_SIZE = 16; // 128-bit tag
+const int GCM_TAG_SIZE = 16;
 
-// --- REVISED SimpleAES CLASS ---
 class SimpleAES {
 private:
-    CryptoPP::SecByteBlock key_; // Crypto++'s secure byte block for keys
-    mutable CryptoPP::AutoSeededRandomPool prng_; // Add mutable for const encrypt method
+    CryptoPP::SecByteBlock key_;
+    mutable CryptoPP::AutoSeededRandomPool prng_;
 
 public:
-    // Constructor takes the AES key
     explicit SimpleAES(const std::vector<unsigned char>& key) : key_(key.data(), key.size()) {
-        // Ensure key size is valid for AES-256 (32 bytes)
-        // AES::MAX_KEYLENGTH is 32 bytes for 256-bit AES
         if (key_.size() != CryptoPP::AES::MAX_KEYLENGTH) {
             throw std::runtime_error("Invalid AES key length. Expected 32 bytes for AES-256.");
         }
     }
 
-    // Encrypts plaintext using AES-256 GCM.
-    // Returns a vector<unsigned char> containing:
-    // [IV (AES::BLOCKSIZE bytes)] [Ciphertext] [Authentication Tag (GCM_TAG_SIZE bytes)]
     std::vector<unsigned char> encrypt(const std::vector<unsigned char>& plaintext) const {
         CryptoPP::SecByteBlock iv(CryptoPP::AES::BLOCKSIZE);
-        prng_.GenerateBlock(iv, iv.size()); // Generate a new random IV for each message
+        prng_.GenerateBlock(iv, iv.size());
 
-        std::string ciphertext_and_tag_str; // Will hold ciphertext + tag
+        std::string ciphertext_and_tag_str;
 
         try {
             CryptoPP::GCM<CryptoPP::AES>::Encryption gcmEncryption;
@@ -91,41 +80,36 @@ public:
 
             CryptoPP::AuthenticatedEncryptionFilter ef(gcmEncryption,
                 new CryptoPP::StringSink(ciphertext_and_tag_str),
-                false, // Don't put "random" pad bytes (GCM is stream cipher, no padding)
-                GCM_TAG_SIZE); // Specify the size of the authentication tag
+                false,
+                GCM_TAG_SIZE);
 
             CryptoPP::StringSource ss(
                 reinterpret_cast<const CryptoPP::byte*>(plaintext.data()),
                 plaintext.size(),
-                true, // Pump all data
-                new CryptoPP::Redirector(ef) // Redirect output to the filter
+                true,
+                new CryptoPP::Redirector(ef)
             );
         }
         catch (const CryptoPP::Exception& e) {
             std::cerr << "AES GCM Encryption Error: " << e.what() << std::endl;
-            throw; // Re-throw to caller
+            throw;
         }
 
-        // Combine IV, ciphertext, and tag for transmission
         std::vector<unsigned char> result;
-        result.reserve(iv.size() + ciphertext_and_tag_str.size()); // Pre-allocate for efficiency
+        result.reserve(iv.size() + ciphertext_and_tag_str.size());
         result.insert(result.end(), iv.begin(), iv.end());
         result.insert(result.end(), ciphertext_and_tag_str.begin(), ciphertext_and_tag_str.end());
 
         return result;
     }
 
-    // Decrypts data (IV + Ciphertext + Tag) using AES-256 GCM.
-    // Throws std::runtime_error if decryption/tag verification fails (data tampered with).
     std::vector<unsigned char> decrypt(const std::vector<unsigned char>& iv_ciphertext_tag) const {
         if (iv_ciphertext_tag.size() < CryptoPP::AES::BLOCKSIZE + GCM_TAG_SIZE) {
             throw std::runtime_error("Ciphertext too short to contain IV and GCM tag.");
         }
 
-        // Extract IV (first AES::BLOCKSIZE bytes)
         CryptoPP::SecByteBlock iv(iv_ciphertext_tag.data(), CryptoPP::AES::BLOCKSIZE);
 
-        // Extract Ciphertext and Tag (remaining bytes)
         const CryptoPP::byte* ciphertext_start = iv_ciphertext_tag.data() + CryptoPP::AES::BLOCKSIZE;
         size_t ciphertext_and_tag_len = iv_ciphertext_tag.size() - CryptoPP::AES::BLOCKSIZE;
 
@@ -143,12 +127,9 @@ public:
             CryptoPP::StringSource ss(
                 ciphertext_start,
                 ciphertext_and_tag_len,
-                true, // Pump all data
-                new CryptoPP::Redirector(df) // Redirect output to the filter
+                true,
+                new CryptoPP::Redirector(df)
             );
-
-            // The AuthenticatedDecryptionFilter throws CryptoPP::HashVerificationFailed
-            // if the GCM tag does not match. If no exception, it's verified.
         }
         catch (const CryptoPP::Exception& e) {
             std::cerr << "AES GCM Decryption/Verification failed: " << e.what() << std::endl;
@@ -156,14 +137,13 @@ public:
         }
         catch (const std::exception& e) {
             std::cerr << "Standard Exception during AES GCM Decryption: " << e.what() << std::endl;
-            throw; // Re-throw any other standard exceptions
+            throw;
         }
 
         return std::vector<unsigned char>(decryptedtext_str.begin(), decryptedtext_str.end());
     }
 };
 
-// Converts a 32-bit unsigned integer to network byte order (big-endian)
 inline std::vector<unsigned char> to_network_byte_order(uint32_t value) {
     std::vector<unsigned char> bytes(4);
     bytes[0] = static_cast<unsigned char>((value >> 24) & 0xFF);
@@ -173,7 +153,6 @@ inline std::vector<unsigned char> to_network_byte_order(uint32_t value) {
     return bytes;
 }
 
-// Converts a 32-bit unsigned integer from network byte order to host byte order
 inline uint32_t from_network_byte_order(const unsigned char* bytes) {
     return (static_cast<uint32_t>(bytes[0]) << 24) |
         (static_cast<uint32_t>(bytes[1]) << 16) |
@@ -181,11 +160,9 @@ inline uint32_t from_network_byte_order(const unsigned char* bytes) {
         static_cast<uint32_t>(bytes[3]);
 }
 
-// Function to send a message with a 4-byte length prefix
 inline bool send_message_with_length(SOCKET sock, const std::vector<unsigned char>& data) {
     uint32_t len = static_cast<uint32_t>(data.size());
 
-    // Check for excessively large messages to send
     if (len > MAX_MESSAGE_SIZE) {
         std::cerr << "Error: Attempted to send message of size " << len << " which exceeds MAX_MESSAGE_SIZE (" << MAX_MESSAGE_SIZE << ").\n";
         return false;
@@ -193,14 +170,12 @@ inline bool send_message_with_length(SOCKET sock, const std::vector<unsigned cha
 
     std::vector<unsigned char> len_bytes = to_network_byte_order(len);
 
-    // Send length prefix
     int bytes_sent_len = send(sock, (char*)len_bytes.data(), len_bytes.size(), 0);
     if (bytes_sent_len == SOCKET_ERROR || bytes_sent_len != len_bytes.size()) {
         std::cerr << "Failed to send length prefix: " << WSAGetLastError() << "\n";
         return false;
     }
 
-    // Send actual data
     size_t total_data_sent = 0;
     while (total_data_sent < len) {
         int sent = send(sock, (char*)data.data() + total_data_sent, (int)(len - total_data_sent), 0);
@@ -213,21 +188,18 @@ inline bool send_message_with_length(SOCKET sock, const std::vector<unsigned cha
     return true;
 }
 
-// Function to receive a message based on a 4-byte length prefix
 inline std::vector<unsigned char> recv_message_with_length(SOCKET sock) {
     unsigned char len_buf[4];
     int bytes_received_len = 0;
     int current_recv_len = 0;
 
-    // Receive length prefix (4 bytes)
     while (bytes_received_len < 4) {
         current_recv_len = recv(sock, (char*)len_buf + bytes_received_len, 4 - bytes_received_len, 0);
-        if (current_recv_len <= 0) { // 0 means disconnect, <0 means error
-            // Log if it's an error, but for graceful disconnect, just return empty
+        if (current_recv_len <= 0) {
             if (current_recv_len < 0) {
                 std::cerr << "Failed to receive length prefix: " << WSAGetLastError() << "\n";
             }
-            return {}; // Return empty vector to indicate error/disconnect
+            return {};
         }
         bytes_received_len += current_recv_len;
     }
@@ -235,23 +207,19 @@ inline std::vector<unsigned char> recv_message_with_length(SOCKET sock) {
     uint32_t expected_data_len = from_network_byte_order(len_buf);
 
     if (expected_data_len == 0) {
-        return {}; // Empty message
+        return {};
     }
 
-    // Critical check: prevent huge allocations from malicious length prefixes
     if (expected_data_len > MAX_MESSAGE_SIZE) {
         std::cerr << "Error: Incoming message size (" << expected_data_len << ") exceeds MAX_MESSAGE_SIZE (" << MAX_MESSAGE_SIZE << "). Disconnecting.\n";
-        // It's usually good to shut down the connection here as it indicates an attack
-        // shutdown(sock, SD_BOTH);
-        // closesocket(sock);
         return {};
     }
 
     std::vector<unsigned char> received_data;
-    received_data.reserve(expected_data_len); // Pre-allocate memory
+    received_data.reserve(expected_data_len);
 
     size_t total_data_received = 0;
-    char temp_buf[BUF_SIZE]; // Use BUF_SIZE for chunks
+    char temp_buf[BUF_SIZE];
 
     while (total_data_received < expected_data_len) {
         size_t remaining_to_recv = expected_data_len - total_data_received;
@@ -263,7 +231,7 @@ inline std::vector<unsigned char> recv_message_with_length(SOCKET sock) {
             if (received_chunk < 0) {
                 std::cerr << "Failed to receive data chunk: " << WSAGetLastError() << "\n";
             }
-            return {}; // Indicate error/disconnect
+            return {};
         }
         received_data.insert(received_data.end(), temp_buf, temp_buf + received_chunk);
         total_data_received += received_chunk;
