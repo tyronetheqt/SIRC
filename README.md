@@ -1,4 +1,4 @@
-# Secure Command-Line Chat Application
+# SIRC - shitty irc (internet relay chat)
 
 ## Overview
 
