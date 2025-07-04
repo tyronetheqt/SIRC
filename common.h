@@ -38,6 +38,10 @@
 #include <gcm.h>
 #include <hex.h>
 #include <secblock.h>
+#include <eccrypto.h>
+#include <oids.h>
+#include <hkdf.h>
+#include <sha.h>
 
 inline std::mutex console_mutex;
 
