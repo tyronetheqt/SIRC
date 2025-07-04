@@ -6,7 +6,7 @@ This project implements a basic client-server chat application with a focus on s
 
 ## Features
 
-* **Client-Server Architecture:** A dedicated server application manages connections and message routing for multiple clients.
+* **Client-Server Architecture:** A dedicated server + client application in one compiled binary.
 * **Secure Key Exchange:** Utilizes **RSA asymmetric encryption** (2048-bit keys) for clients to securely exchange a symmetric session key with the server.
 * **Authenticated Encryption:** All subsequent client-server communication is encrypted and authenticated using **AES-256 in GCM (Galois/Counter Mode)**, providing both confidentiality and integrity/authenticity.
 * **Multi-threaded Design:**
@@ -56,16 +56,16 @@ This project requires the **Crypto++ library**. Ensure you have it installed and
 1.  **Compile:** Build both the server and client executables.
 2.  **Start the Server:**
     ```bash
-    ./server.exe <port_number>
+    ./binary.exe server
     ```
-    Example: `.\server.exe 12345`
+    Example: `.\binary.exe server`
     The server will start listening for incoming connections.
 3.  **Start Clients:**
     Open one or more separate command prompts/terminals for clients.
     ```bash
-    ./client.exe <server_ip_address> <port_number> <your_username>
+    ./binary.exe <server_ip_address> <port_number> <your_username>
     ```
-    Example: `.\client.exe 127.0.0.1 12345 Alice`
+    Example: `.\binary.exe 127.0.0.1 12345 Alice`
     The client will attempt to connect, perform key exchange, and then prompt for commands.
 
 ## Future Improvements
@@ -79,4 +79,4 @@ This project requires the **Crypto++ library**. Ensure you have it installed and
 
 ## License
 
-This project is open-source and is GPL v3.0.
+This project is open-source and is licensed under GPL v3.0.
