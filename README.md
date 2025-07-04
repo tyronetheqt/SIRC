@@ -13,17 +13,21 @@ This project implements a basic client-server chat application with a focus on s
     * The server spawns a new thread for each connected client, allowing it to handle multiple concurrent connections efficiently.
     * The client application uses separate threads for sending commands and continuously receiving messages from the server, ensuring a responsive user experience.
 * **Basic Command Set:** Supports a variety of text-based commands:
-    * `PING`: Checks server responsiveness.
-    * `TIME`: Retrieves the current server time.
-    * `STATUS`: Gets the server's operational status.
-    * `ECHO <message>`: Server echoes back the provided message.
-    * `RANDOM`: Generates a random number (1-100).
-    * `MOTD`: Displays a "Message of the Day."
-    * `UPTIME`: Shows how long the server has been running.
-    * `ONLINE` / `USERS`: Lists currently connected users.
-    * `MSG <username> <message>`: Sends a private message to a specific online user.
-    * `CMDS` / `COMMANDS`: Lists all available commands.
-* **Robust Error Handling:** Includes basic error handling for network operations and cryptographic failures.
+   * `PING`: Checks server responsiveness.
+   * `TIME`: Retrieves the current server time.
+   * `STATUS`: Gets the server's operational status.
+   * `ECHO <message>`: Server echoes back the provided message.
+   * `RANDOM`: Generates a random number (1-100).
+   * `MOTD`: Displays a "Message of the Day."
+   * `UPTIME`: Shows how long the server has been running.
+   * `ONLINE` / `USERS`: Lists currently connected users.
+   * `MSG <username> <message>`: Sends a private message to a specific online user.
+   * `JOIN <channel_name>`: Joins or creates a channel.
+   * `LEAVE [<channel_name>]`: Leaves a specific channel, or your current channel if none is specified.
+   * `LIST`: Lists all active channels.
+   * `WHO <channel_name>`: Lists users in a specified channel.
+   * `MSG #<channel_name> <message>`: Sends a message to a specific channel.
+   * `CMDS` / `COMMANDS`: Lists all available commands.
 
 ## Technologies Used
 
