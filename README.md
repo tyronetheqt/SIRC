@@ -6,24 +6,28 @@ This project implements a basic client-server chat application with a focus on s
 
 ## Features
 
-* **Client-Server Architecture:** A dedicated server application manages connections and message routing for multiple clients.
+* **Client-Server Architecture:** A dedicated server + client application in one compiled binary.
 * **Secure Key Exchange:** Utilizes **RSA asymmetric encryption** (2048-bit keys) for clients to securely exchange a symmetric session key with the server.
 * **Authenticated Encryption:** All subsequent client-server communication is encrypted and authenticated using **AES-256 in GCM (Galois/Counter Mode)**, providing both confidentiality and integrity/authenticity.
 * **Multi-threaded Design:**
     * The server spawns a new thread for each connected client, allowing it to handle multiple concurrent connections efficiently.
     * The client application uses separate threads for sending commands and continuously receiving messages from the server, ensuring a responsive user experience.
 * **Basic Command Set:** Supports a variety of text-based commands:
-    * `PING`: Checks server responsiveness.
-    * `TIME`: Retrieves the current server time.
-    * `STATUS`: Gets the server's operational status.
-    * `ECHO <message>`: Server echoes back the provided message.
-    * `RANDOM`: Generates a random number (1-100).
-    * `MOTD`: Displays a "Message of the Day."
-    * `UPTIME`: Shows how long the server has been running.
-    * `ONLINE` / `USERS`: Lists currently connected users.
-    * `MSG <username> <message>`: Sends a private message to a specific online user.
-    * `CMDS` / `COMMANDS`: Lists all available commands.
-* **Robust Error Handling:** Includes basic error handling for network operations and cryptographic failures.
+   * `PING`: Checks server responsiveness.
+   * `TIME`: Retrieves the current server time.
+   * `STATUS`: Gets the server's operational status.
+   * `ECHO <message>`: Server echoes back the provided message.
+   * `RANDOM`: Generates a random number (1-100).
+   * `MOTD`: Displays a "Message of the Day."
+   * `UPTIME`: Shows how long the server has been running.
+   * `ONLINE` / `USERS`: Lists currently connected users.
+   * `MSG <username> <message>`: Sends a private message to a specific online user.
+   * `JOIN <channel_name>`: Joins or creates a channel.
+   * `LEAVE [<channel_name>]`: Leaves a specific channel, or your current channel if none is specified.
+   * `LIST`: Lists all active channels.
+   * `WHO <channel_name>`: Lists users in a specified channel.
+   * `MSG #<channel_name> <message>`: Sends a message to a specific channel.
+   * `CMDS` / `COMMANDS`: Lists all available commands.
 
 ## Technologies Used
 
@@ -52,16 +56,16 @@ This project requires the **Crypto++ library**. Ensure you have it installed and
 1.  **Compile:** Build both the server and client executables.
 2.  **Start the Server:**
     ```bash
-    ./server.exe <port_number>
+    ./binary.exe server
     ```
-    Example: `.\server.exe 12345`
+    Example: `.\binary.exe server`
     The server will start listening for incoming connections.
 3.  **Start Clients:**
     Open one or more separate command prompts/terminals for clients.
     ```bash
-    ./client.exe <server_ip_address> <port_number> <your_username>
+    ./binary.exe <server_ip_address> <port_number> <your_username>
     ```
-    Example: `.\client.exe 127.0.0.1 12345 Alice`
+    Example: `.\binary.exe 127.0.0.1 12345 Alice`
     The client will attempt to connect, perform key exchange, and then prompt for commands.
 
 ## Future Improvements
@@ -75,4 +79,4 @@ This project requires the **Crypto++ library**. Ensure you have it installed and
 
 ## License
 
-This project is open-source and is GPL v3.0.
+This project is open-source and is licensed under GPL v3.0.
