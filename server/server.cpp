@@ -1,5 +1,12 @@
 #include "../common.h"
 #include "server.h"
+#include <winsock2.h>
+#include <iphlpapi.h>
+#include <icmpapi.h>
+#include <ws2tcpip.h>
+
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "iphlpapi.lib")
 
 static auto serverStartTime = std::chrono::steady_clock::now();
 
@@ -259,7 +266,50 @@ void handleClient(SOCKET clientSocket) {
                 std::string responseMessage; // Response message will be std::string
 
                 if (processedCommand == "PING") {
-                    responseMessage = "PONG";
+                    SOCKADDR_IN clientAddr;
+                    int clientAddrLen = sizeof(clientAddr);
+                    getpeername(clientSocket, (SOCKADDR*)&clientAddr, &clientAddrLen);
+                    IPAddr ipAddress = clientAddr.sin_addr.S_un.S_addr;
+
+                    HANDLE hIcmpFile = IcmpCreateFile();
+                    if (hIcmpFile == INVALID_HANDLE_VALUE) {
+                        responseMessage = "Server: Could not create ICMP handle.";
+                        std::lock_guard<std::mutex> lock(console_mutex);
+                        std::cerr << "Server: IcmpCreateFile failed: " << GetLastError() << "\n";
+                    }
+                    else {
+                        char sendData[] = "PingData";
+                        int requestSize = sizeof(sendData);
+
+                        std::vector<char> replyBuffer(sizeof(ICMP_ECHO_REPLY) + requestSize);
+
+                        DWORD timeout = 1000;
+
+                        DWORD dwRetVal = IcmpSendEcho(
+                            hIcmpFile,
+                            ipAddress,
+                            sendData,
+                            requestSize,
+                            NULL,
+                            replyBuffer.data(),
+                            static_cast<DWORD>(replyBuffer.size()),
+                            timeout
+                        );
+
+                        if (dwRetVal != 0) {
+                            PICMP_ECHO_REPLY pEchoReply = (PICMP_ECHO_REPLY)replyBuffer.data();
+                            if (pEchoReply->Status == IP_SUCCESS) {
+                                responseMessage = "Ping RTT: " + std::to_string(pEchoReply->RoundTripTime) + "ms";
+                            }
+                            else {
+                                responseMessage = "Ping failed with status: " + std::to_string(pEchoReply->Status);
+                            }
+                        }
+                        else {
+                            responseMessage = "Ping timed out or failed. Error: " + std::to_string(GetLastError());
+                        }
+                        IcmpCloseHandle(hIcmpFile);
+                    }
                 }
                 else if (processedCommand == "TIME") {
                     std::time_t now_time_t = std::time(nullptr);
