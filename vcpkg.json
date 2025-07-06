@@ -1,7 +1,19 @@
 {
   "dependencies": [
+    "cryptopp",
     "boost-asio",
     "boost-system",
     "boost-cmake"
+  ],
+  "builtin-baseline": "23d8c11a9e9a4f4d2f0d9c0e0e0e0e0e0e0e0e0e",
+  "overrides": [
+    {
+      "name": "cryptopp",
+      "version": "8.8.0"
+    },
+    {
+      "name": "boost-asio",
+      "version": "1.85.0"
+    }
   ]
 }
