@@ -1,4 +1,3 @@
-// client/client.cpp
 #include "../common.h"
 #include "client.h"
 #include <boost/asio.hpp>
@@ -7,16 +6,7 @@
 #include <queue>
 #include <mutex>
 #include <condition_variable>
-#include <memory> // For std::shared_ptr
-
-// CryptoPP includes (already in common.h)
-#include <cryptopp/aes.h>
-#include <cryptopp/gcm.h>
-#include <cryptopp/filters.h>
-#include <cryptopp/osrng.h>
-#include <cryptopp/rsa.h>
-#include <cryptopp/base64.h>
-#include <cryptopp/modes.h>
+#include <memory>
 
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
@@ -246,6 +236,16 @@ int runClient(const std::string& ipAddress, int port, const std::string& usernam
                 std::lock_guard<std::mutex> lock(console_mutex);
                 std::cout << "Exiting client.\n" << std::flush;
                 break;
+            }
+
+            if (command == "quit") {
+                std::lock_guard<std::mutex> lock(console_mutex);
+                std::cout << "Exiting client.\n" << std::flush;
+                break;
+            }
+
+            if (command == "ping") {
+                
             }
 
             std::vector<unsigned char> encryptedCommand;

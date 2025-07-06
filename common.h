@@ -1,8 +1,6 @@
-// common.h
 #ifndef COMMON_H
 #define COMMON_H
 
-// Standard library includes
 #include <iostream>
 #include <vector>
 #include <string>
@@ -48,7 +46,6 @@ const int port = 12345;
 
 constexpr size_t BUF_SIZE = 4096;
 
-// Maximum message size
 constexpr uint32_t MAX_MESSAGE_SIZE = 10 * 1024 * 1024;
 
 const int GCM_TAG_SIZE = 16;
@@ -176,36 +173,47 @@ inline bool send_message_with_length(tcp::socket& socket, const std::vector<unsi
 }
 
 inline std::vector<unsigned char> recv_message_with_length(tcp::socket& socket) {
-    try {
-        uint32_t network_length;
-        asio::read(socket, asio::buffer(&network_length, sizeof(network_length)));
-        uint32_t length = asio::detail::socket_ops::network_to_host_long(network_length);
+    uint32_t network_length;
+    boost::system::error_code ec;
 
-        if (length == 0) {
-            return {};
-        }
-
-        if (length > MAX_MESSAGE_SIZE) {
-            std::lock_guard<std::mutex> lock(console_mutex);
-            std::cerr << "Error: Incoming message size (" << length << ") exceeds MAX_MESSAGE_SIZE (" << MAX_MESSAGE_SIZE << "). Disconnecting.\n";
-            return {};
-        }
-
-        std::vector<unsigned char> data(length);
-        asio::read(socket, asio::buffer(data));
-        return data;
-    }
-    catch (const boost::system::system_error& e) {
-        if (e.code() == asio::error::eof) {
-            std::lock_guard<std::mutex> lock(console_mutex);
-            std::cout << "Network Info (recv_message_with_length): Peer disconnected gracefully." << std::endl;
+    asio::read(socket, asio::buffer(&network_length, sizeof(network_length)), ec);
+    if (ec) {
+        std::lock_guard<std::mutex> lock(console_mutex);
+        if (ec == asio::error::eof) {
+            std::cout << "Network Info (recv_message_with_length): Peer disconnected gracefully.\n";
         }
         else {
-            std::lock_guard<std::mutex> lock(console_mutex);
-            std::cerr << "Network Error (recv_message_with_length): " << e.what() << std::endl;
+            std::cerr << "Network Error (recv_message_with_length) reading length: " << ec.message() << "\n";
         }
         return {};
     }
+
+    uint32_t length = asio::detail::socket_ops::network_to_host_long(network_length);
+
+    if (length == 0) {
+        return {};
+    }
+
+    if (length > MAX_MESSAGE_SIZE) {
+        std::lock_guard<std::mutex> lock(console_mutex);
+        std::cerr << "Error: Incoming message size (" << length << ") exceeds MAX_MESSAGE_SIZE (" << MAX_MESSAGE_SIZE << "). Disconnecting.\n";
+        return {};
+    }
+
+    std::vector<unsigned char> data(length);
+    asio::read(socket, asio::buffer(data), ec);
+    if (ec) {
+        std::lock_guard<std::mutex> lock(console_mutex);
+        if (ec == asio::error::eof) {
+            std::cout << "Network Info (recv_message_with_length): Peer disconnected gracefully while reading message body.\n";
+        }
+        else {
+            std::cerr << "Network Error (recv_message_with_length) reading body: " << ec.message() << "\n";
+        }
+        return {};
+    }
+
+    return data;
 }
 
 inline std::vector<unsigned char> generateRandomKey(size_t length) {

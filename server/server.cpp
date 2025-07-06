@@ -13,14 +13,6 @@
 #include <random>
 #include <sstream>
 
-#include <cryptopp/aes.h>
-#include <cryptopp/gcm.h>
-#include <cryptopp/filters.h>
-#include <cryptopp/osrng.h>
-#include <cryptopp/rsa.h>
-#include <cryptopp/base64.h>
-#include <cryptopp/modes.h>
-
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
 
@@ -125,8 +117,18 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
     std::vector<unsigned char> encryptedAESKeyVec = recv_message_with_length(*clientSocketPtr);
     if (encryptedAESKeyVec.empty()) {
         std::lock_guard<std::mutex> lock(console_mutex);
-        std::cerr << "Server: Failed to receive encrypted AES key or client disconnected during key exchange from " << clientSocketPtr->remote_endpoint().address().to_string()
-            << ":" << clientSocketPtr->remote_endpoint().port() << ".\n";
+
+        boost::system::error_code ec;
+        auto endpoint = clientSocketPtr->remote_endpoint(ec);
+
+        if (ec) {
+            std::cerr << "Server: Failed to receive encrypted AES key or client disconnected during key exchange from unknown endpoint (error: " << ec.message() << ").\n";
+        }
+        else {
+            std::cerr << "Server: Failed to receive encrypted AES key or client disconnected during key exchange from " << endpoint.address().to_string()
+                << ":" << endpoint.port() << ".\n";
+        }
+
         clientSocketPtr->close();
         return;
     }
@@ -139,10 +141,22 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
 
         if (encryptedAESKeyStr.size() != decryptor.FixedCiphertextLength()) {
             std::lock_guard<std::mutex> lock(console_mutex);
-            std::cerr << "Server: Error: Received encrypted AES key size (" << encryptedAESKeyStr.size()
-                << " bytes) does not match expected RSA ciphertext length ("
-                << decryptor.FixedCiphertextLength() << " bytes) from " << clientSocketPtr->remote_endpoint().address().to_string()
-                << ":" << clientSocketPtr->remote_endpoint().port() << ".\n";
+
+            boost::system::error_code ec;
+            auto endpoint = clientSocketPtr->remote_endpoint(ec);
+
+            if (ec) {
+                std::cerr << "Server: Error: Received encrypted AES key size (" << encryptedAESKeyStr.size()
+                    << " bytes) does not match expected RSA ciphertext length ("
+                    << decryptor.FixedCiphertextLength() << " bytes) from unknown endpoint (error: " << ec.message() << ").\n";
+            }
+            else {
+                std::cerr << "Server: Error: Received encrypted AES key size (" << encryptedAESKeyStr.size()
+                    << " bytes) does not match expected RSA ciphertext length ("
+                    << decryptor.FixedCiphertextLength() << " bytes) from " << endpoint.address().to_string()
+                    << ":" << endpoint.port() << ".\n";
+            }
+
             clientSocketPtr->close();
             return;
         }
@@ -153,8 +167,18 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
 
         if (decryptedAESKey.size() != 32) {
             std::lock_guard<std::mutex> lock(console_mutex);
-            std::cerr << "Server: Warning: Decrypted AES key has unexpected size: " << decryptedAESKey.size() << " bytes. Expected 32 for AES-256 from " << clientSocketPtr->remote_endpoint().address().to_string()
-                << ":" << clientSocketPtr->remote_endpoint().port() << ".\n";
+
+            boost::system::error_code ec;
+            auto endpoint = clientSocketPtr->remote_endpoint(ec);
+
+            if (ec) {
+                std::cerr << "Server: Warning: Decrypted AES key has unexpected size: " << decryptedAESKey.size() << " bytes. Expected 32 for AES-256 from unknown endpoint (error: " << ec.message() << ").\n";
+            }
+            else {
+                std::cerr << "Server: Warning: Decrypted AES key has unexpected size: " << decryptedAESKey.size() << " bytes. Expected 32 for AES-256 from " << endpoint.address().to_string()
+                    << ":" << endpoint.port() << ".\n";
+            }
+
             clientSocketPtr->close();
             return;
         }
@@ -197,8 +221,18 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
 
     if (encryptedUsername.empty()) {
         std::lock_guard<std::mutex> lock(console_mutex);
-        std::cerr << "Server: Error receiving username from client " << clientSocketPtr->remote_endpoint().address().to_string()
-            << ":" << clientSocketPtr->remote_endpoint().port() << " or client disconnected during username exchange.\n";
+
+        boost::system::error_code ec;
+        auto endpoint = clientSocketPtr->remote_endpoint(ec);
+
+        if (ec) {
+            std::cerr << "Server: Error receiving username from client at unknown endpoint (error: " << ec.message() << ") or client disconnected during username exchange.\n";
+        }
+        else {
+            std::cerr << "Server: Error receiving username from client " << endpoint.address().to_string()
+                << ":" << endpoint.port() << " or client disconnected during username exchange.\n";
+        }
+
         clientSocketPtr->close();
         return;
     }
@@ -209,8 +243,15 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
 
         {
             std::lock_guard<std::mutex> lock(console_mutex);
-            std::cout << "Server: Received username: '" << clientUsername << "' from " << clientSocketPtr->remote_endpoint().address().to_string()
-                << ":" << clientSocketPtr->remote_endpoint().port() << "\n";
+            boost::system::error_code ec;
+            auto endpoint = clientSocketPtr->remote_endpoint(ec);
+            if (ec) {
+                std::cout << "Server: Received username: '" << clientUsername << "' from unknown endpoint (error: " << ec.message() << ")\n";
+            }
+            else {
+                std::cout << "Server: Received username: '" << clientUsername << "' from " << endpoint.address().to_string()
+                    << ":" << endpoint.port() << "\n";
+            }
         }
 
         std::string ackMessage = "Welcome, " + clientUsername + "! Type /CMDS for commands. Join a channel with /JOIN <channel_name>.";
@@ -219,8 +260,19 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
 
         if (!send_message_with_length(*clientSocketPtr, encryptedAck)) {
             std::lock_guard<std::mutex> lock(console_mutex);
-            std::cerr << "Server: Error sending username ack to '" << clientUsername << "' (with length prefix) " << clientSocketPtr->remote_endpoint().address().to_string()
-                << ":" << clientSocketPtr->remote_endpoint().port() << ".\n";
+
+            boost::system::error_code ec;
+            auto endpoint = clientSocketPtr->remote_endpoint(ec);
+
+            if (ec) {
+                std::cerr << "Server: Error sending username ack to '" << clientUsername
+                    << "' (with length prefix). Could not get endpoint: " << ec.message() << ".\n";
+            }
+            else {
+                std::cerr << "Server: Error sending username ack to '" << clientUsername
+                    << "' (with length prefix) " << endpoint.address().to_string() << ":" << endpoint.port() << ".\n";
+            }
+
             clientSocketPtr->close();
             return;
         }
@@ -243,8 +295,14 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
         }
         {
             std::lock_guard<std::mutex> lock(console_mutex);
-            std::cout << "Server: Client '" << clientUsername << "' (Socket: " << clientSocketPtr->remote_endpoint().address().to_string()
-                << ":" << clientSocketPtr->remote_endpoint().port() << ") added to online users list.\n";
+            boost::system::error_code ec;
+            auto endpoint = clientSocketPtr->remote_endpoint(ec);
+            if (ec) {
+                std::cout << "Server: Client '" << clientUsername << "' (Socket: unknown endpoint, error getting endpoint: " << ec.message() << ") added to online users list.\n";
+            }
+            else {
+                std::cout << "Server: Client '" << clientUsername << "' (Socket: " << endpoint.address().to_string() << ":" << endpoint.port() << ") added to online users list.\n";
+            }
             std::cout << "Server: Client '" << clientUsername << "' connected, ready to receive encrypted data.\n";
         }
 
@@ -258,14 +316,34 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
             if (encryptedData.empty()) {
                 std::lock_guard<std::mutex> lock(console_mutex);
                 boost::system::error_code ec;
-                clientSocketPtr->remote_endpoint(ec);
-                if (ec == boost::asio::error::eof || ec == boost::asio::error::bad_descriptor) {
-                    std::cout << "Server: Client '" << clientUsername << "' disconnected gracefully from " << clientSocketPtr->remote_endpoint().address().to_string()
-                        << ":" << clientSocketPtr->remote_endpoint().port() << ".\n";
+                tcp::endpoint endpoint;
+                try {
+                    endpoint = clientSocketPtr->remote_endpoint(ec);
+                }
+                catch (const boost::system::system_error& e) {
+                    std::cerr << "Server: Exception when trying to get remote_endpoint for '" << clientUsername << "': " << e.what() << "\n";
+                    std::cout << "Server: Client '" << clientUsername << "' disconnected (endpoint unavailable).\n";
+                    break;
+                }
+
+                if (ec) {
+                    if (ec == boost::asio::error::eof || ec == boost::asio::error::bad_descriptor) {
+                        std::cout << "Server: Client '" << clientUsername << "' disconnected gracefully (EOF/Bad Descriptor) from "
+                            << (endpoint.address().to_string() + ":" + std::to_string(endpoint.port())) << ".\n";
+                    }
+                    else if (ec == boost::asio::error::connection_reset) {
+                        std::cout << "Server: Client '" << clientUsername << "' disconnected abruptly (Connection Reset) from "
+                            << (endpoint.address().to_string() + ":" + std::to_string(endpoint.port())) << ".\n";
+                    }
+                    else {
+                        std::cerr << "Server: recv error from '" << clientUsername << "' (with length prefix) "
+                            << (endpoint.address().to_string() + ":" + std::to_string(endpoint.port()))
+                            << ". Error Code: " << ec.message() << ".\n";
+                    }
                 }
                 else {
-                    std::cout << "Server: recv error from '" << clientUsername << "' (with length prefix) " << clientSocketPtr->remote_endpoint().address().to_string()
-                        << ":" << clientSocketPtr->remote_endpoint().port() << ". Error Code: " << ec.message() << "\n";
+                    std::cout << "Server: Client '" << clientUsername << "' disconnected cleanly from "
+                        << endpoint.address().to_string() << ":" << endpoint.port() << ".\n";
                 }
                 break;
             }
@@ -280,27 +358,44 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
 
                 {
                     std::lock_guard<std::mutex> lock(console_mutex);
-                    std::cout << "Server received " << encryptedData.size() << " bytes from '" << clientUsername << "' (" << clientSocketPtr->remote_endpoint().address().to_string()
-                        << ":" << clientSocketPtr->remote_endpoint().port() << "). Decrypted command: '" << decryptedCommand << "'\n";
+                    boost::system::error_code ec;
+                    auto endpoint = clientSocketPtr->remote_endpoint(ec);
+                    if (ec) {
+                        std::cout << "Server received " << encryptedData.size() << " bytes from '" << clientUsername
+                            << "' (Socket: unknown endpoint, error getting endpoint: " << ec.message() << ")"
+                            << ". Decrypted command: '" << decryptedCommand << "'\n";
+                    }
+                    else {
+                        std::cout << "Server received " << encryptedData.size() << " bytes from '" << clientUsername
+                            << "' (" << endpoint.address().to_string() << ":" << endpoint.port() << ")"
+                            << ". Decrypted command: '" << decryptedCommand << "'\n";
+                    }
                 }
 
                 std::string responseMessage;
 
                 if (processedCommand == "PING") {
-                    responseMessage = "ill do it later";
+
                 }
                 else if (processedCommand == "TIME") {
                     std::time_t now_time_t = std::time(nullptr);
-                    std::tm ltm_buf;
-                    std::tm* result_tm = std::localtime(&now_time_t);
+                    std::tm ltm_buf{};
 
-                    if (result_tm == nullptr) {
+#if defined(_WIN32) || defined(_WIN64)
+                    errno_t err = localtime_s(&ltm_buf, &now_time_t);
+                    if (err != 0) {
                         responseMessage = "Error getting server time.";
                         std::lock_guard<std::mutex> lock(console_mutex);
-                        std::cerr << "Server: std::localtime failed.\n";
+                        std::cerr << "Server: localtime_s failed with error code " << err << ".\n";
                     }
-                    else {
-                        ltm_buf = *result_tm;
+#else
+                    if (localtime_r(&now_time_t, &ltm_buf) == nullptr) {
+                        responseMessage = "Error getting server time.";
+                        std::lock_guard<std::mutex> lock(console_mutex);
+                        std::cerr << "Server: localtime_r failed.\n";
+                    }
+#endif
+                    if (responseMessage.empty()) {
                         std::stringstream ss;
                         ss << std::put_time(&ltm_buf, "%Y-%m-%d %H:%M:%S");
                         responseMessage = ss.str();
@@ -459,8 +554,19 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
 
                                 if (!send_message_with_length(*targetSocketPtr, encryptedMessage)) {
                                     std::lock_guard<std::mutex> lock(console_mutex);
-                                    std::cerr << "Server: Error sending message to '" << targetUsername << "' (Socket: " << targetSocketPtr->remote_endpoint().address().to_string()
-                                        << ":" << targetSocketPtr->remote_endpoint().port() << ") with length prefix.\n";
+
+                                    boost::system::error_code ec;
+                                    auto endpoint = targetSocketPtr->remote_endpoint(ec);
+
+                                    if (ec) {
+                                        std::cerr << "Server: Error sending message to '" << targetUsername
+                                            << "' (Socket: unknown endpoint, error getting endpoint: " << ec.message() << ") with length prefix.\n";
+                                    }
+                                    else {
+                                        std::cerr << "Server: Error sending message to '" << targetUsername
+                                            << "' (Socket: " << endpoint.address().to_string() << ":" << endpoint.port() << ") with length prefix.\n";
+                                    }
+
                                     senderResponseMessage = "Error: Could not send message to '" + targetUsername + "'. They might have disconnected.";
                                 }
                                 else {
@@ -628,7 +734,6 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
 
                             if (channel) {
                                 std::string leaveBroadcastMessage = clientUsername + " has left #" + channelNameArg + ".";
-                                bool channelBecameEmpty = false;
                                 {
                                     std::lock_guard<std::mutex> channelLock(channel->mutex);
                                     bool wasMember = false;
@@ -639,9 +744,6 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
                                             break;
                                         }
                                     }
-                                    if (channel->members.empty()) {
-                                        channelBecameEmpty = true;
-                                    }
                                     if (!wasMember) {
                                         responseMessage = "Error: You are not a member of channel #" + channelNameArg + ".";
                                     }
@@ -649,13 +751,6 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
 
                                 if (responseMessage.empty()) {
                                     broadcastToChannel(channelNameArg, leaveBroadcastMessage);
-                                }
-
-                                if (channelBecameEmpty) {
-                                    std::lock_guard<std::mutex> lock(channels_mutex);
-                                    channels.erase(channelNameArg);
-                                    std::lock_guard<std::mutex> consoleLock(console_mutex);
-                                    std::cout << "Server: Channel #" << channelNameArg << " is now empty and removed.\n";
                                 }
                                 if (responseMessage.empty()) {
                                     joinedChannels.erase(it_joined);
@@ -732,14 +827,28 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
             }
             catch (const CryptoPP::Exception& e) {
                 std::lock_guard<std::mutex> lock(console_mutex);
-                std::cerr << "Server: Crypto++ Exception during decryption from '" << clientUsername << "' (" << clientSocketPtr->remote_endpoint().address().to_string()
-                    << ":" << clientSocketPtr->remote_endpoint().port() << "): " << e.what() << "\n";
+
+                boost::system::error_code ec;
+                auto endpoint = clientSocketPtr->remote_endpoint(ec);
+                std::string address = ec ? "disconnected" : endpoint.address().to_string();
+                unsigned short port = ec ? 0 : endpoint.port();
+
+                std::cerr << "Server: Crypto++ Exception during decryption from '" << clientUsername
+                    << "' (" << address << ":" << port << "): " << e.what() << "\n";
+
                 sendMessageToClient(clientSocketPtr, "Error: Failed to decrypt message. Possible tampering or key mismatch.");
             }
             catch (const std::exception& e) {
                 std::lock_guard<std::mutex> lock(console_mutex);
-                std::cerr << "Server: Standard Exception during command processing from '" << clientUsername << "' (" << clientSocketPtr->remote_endpoint().address().to_string()
-                    << ":" << clientSocketPtr->remote_endpoint().port() << "): " << e.what() << "\n";
+
+                boost::system::error_code ec;
+                auto endpoint = clientSocketPtr->remote_endpoint(ec);
+                std::string address = ec ? "disconnected" : endpoint.address().to_string();
+                unsigned short port = ec ? 0 : endpoint.port();
+
+                std::cerr << "Server: Standard Exception during command processing from '" << clientUsername
+                    << "' (" << address << ":" << port << "): " << e.what() << "\n";
+
                 sendMessageToClient(clientSocketPtr, "Error processing your command.");
             }
         } while (clientSocketPtr->is_open());
@@ -751,8 +860,18 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
     }
     {
         std::lock_guard<std::mutex> lock(console_mutex);
-        std::cout << "Server: Client '" << clientUsername << "' (Socket: " << clientSocketPtr->remote_endpoint().address().to_string()
-            << ":" << clientSocketPtr->remote_endpoint().port() << ") removed from online users list.\n";
+
+        boost::system::error_code ec;
+        auto endpoint = clientSocketPtr->remote_endpoint(ec);
+        if (ec) {
+            std::cerr << "Server: Could not get remote endpoint for client '" << clientUsername
+                << "'. Error: " << ec.message() << "\n";
+        }
+        else {
+            std::cout << "Server: Client '" << clientUsername << "' (Socket: "
+                << endpoint.address().to_string() << ":" << endpoint.port()
+                << ") removed from online users list.\n";
+        }
     }
 
     std::vector<std::string> channelsToRemove;
@@ -777,13 +896,6 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
                     std::cout << "Erased client from #" << channelName << "\n";
 
                     std::string leaveBroadcastMessage = clientUsername + " has left #" + channelName + ".";
-
-                    /*try {
-                        broadcastToChannel(channelName, leaveBroadcastMessage);
-                    }
-                    catch (const std::exception& e) {
-                        std::cerr << "Broadcast failed in #" << channelName << ": " << e.what() << "\n";
-                    }*/
 
                     if (channel->members.empty()) {
                         std::cout << "Server: #" << channelName << " attempting to erase.\n";
