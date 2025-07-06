@@ -1,3 +1,8 @@
-#pragma once
+#ifndef CLIENT_H
+#define CLIENT_H
 
-int runClient(const std::string& ipAddress, const std::string& port, const std::string& username);
+#include <string>
+
+int runClient(const std::string& serverIp, int port, const std::string& username);
+
+#endif

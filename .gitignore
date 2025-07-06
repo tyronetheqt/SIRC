@@ -12,6 +12,7 @@
 
 vcpkg
 out
+vcpkg_installed
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs

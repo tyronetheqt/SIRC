@@ -1,14 +1,8 @@
-#pragma once
+// common.h
+#ifndef COMMON_H
+#define COMMON_H
 
-#define UNICODE
-#define _UNICODE
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
-
+// Standard library includes
 #include <iostream>
 #include <vector>
 #include <string>
@@ -21,44 +15,48 @@
 #include <cctype>
 #include <limits>
 #include <string_view>
-
 #include <thread>
 #include <mutex>
 #include <map>
 #include <queue>
 #include <condition_variable>
+#include <memory>
 
-#include <aes.h>
-#include <modes.h>
-#include <filters.h>
-#include <osrng.h>
-#include <base64.h>
-#include <rsa.h>
-#include <files.h>
-#include <gcm.h>
-#include <hex.h>
-#include <secblock.h>
-#include <eccrypto.h>
-#include <oids.h>
-#include <hkdf.h>
-#include <sha.h>
+#include <cryptopp/aes.h>
+#include <cryptopp/modes.h>
+#include <cryptopp/filters.h>
+#include <cryptopp/osrng.h>
+#include <cryptopp/base64.h>
+#include <cryptopp/rsa.h>
+#include <cryptopp/files.h>
+#include <cryptopp/gcm.h>
+#include <cryptopp/hex.h>
+#include <cryptopp/secblock.h>
 
-inline std::mutex console_mutex;
+#include <boost/asio.hpp>
+#include <boost/asio/ts/buffer.hpp>
+#include <boost/asio/ts/internet.hpp>
+#include <boost/asio/detail/socket_ops.hpp>
 
-inline std::queue<std::string> incoming_messages_queue;
-inline std::mutex incoming_messages_mutex;
-inline std::condition_variable incoming_messages_cv;
+extern std::mutex console_mutex;
 
-constexpr std::string port_str = "12345";
-const std::string port = "12345";
+extern std::queue<std::string> incoming_messages_queue;
+extern std::mutex incoming_messages_mutex;
+extern std::condition_variable incoming_messages_cv;
+
+const int port = 12345;
 
 constexpr size_t BUF_SIZE = 4096;
 
-constexpr uint32_t MAX_MESSAGE_SIZE = 1397969993;
-
-#pragma comment(lib, "Ws2_32.lib")
+// Maximum message size
+constexpr uint32_t MAX_MESSAGE_SIZE = 10 * 1024 * 1024;
 
 const int GCM_TAG_SIZE = 16;
+
+inline void print_to_console(const std::string& message) {
+    std::lock_guard<std::mutex> lock(console_mutex);
+    std::cout << message << std::endl;
+}
 
 class SimpleAES {
 private:
@@ -95,6 +93,7 @@ public:
             );
         }
         catch (const CryptoPP::Exception& e) {
+            std::lock_guard<std::mutex> lock(console_mutex);
             std::cerr << "AES GCM Encryption Error: " << e.what() << std::endl;
             throw;
         }
@@ -136,10 +135,12 @@ public:
             );
         }
         catch (const CryptoPP::Exception& e) {
+            std::lock_guard<std::mutex> lock(console_mutex);
             std::cerr << "AES GCM Decryption/Verification failed: " << e.what() << std::endl;
             throw std::runtime_error(std::string("AES GCM Decryption/Verification failed: ") + e.what());
         }
         catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lock(console_mutex);
             std::cerr << "Standard Exception during AES GCM Decryption: " << e.what() << std::endl;
             throw;
         }
@@ -148,99 +149,63 @@ public:
     }
 };
 
-inline std::vector<unsigned char> to_network_byte_order(uint32_t value) {
-    std::vector<unsigned char> bytes(4);
-    bytes[0] = static_cast<unsigned char>((value >> 24) & 0xFF);
-    bytes[1] = static_cast<unsigned char>((value >> 16) & 0xFF);
-    bytes[2] = static_cast<unsigned char>((value >> 8) & 0xFF);
-    bytes[3] = static_cast<unsigned char>(value & 0xFF);
-    return bytes;
-}
+namespace asio = boost::asio;
+using tcp = asio::ip::tcp;
 
-inline uint32_t from_network_byte_order(const unsigned char* bytes) {
-    return (static_cast<uint32_t>(bytes[0]) << 24) |
-        (static_cast<uint32_t>(bytes[1]) << 16) |
-        (static_cast<uint32_t>(bytes[2]) << 8) |
-        static_cast<uint32_t>(bytes[3]);
-}
-
-inline bool send_message_with_length(SOCKET sock, const std::vector<unsigned char>& data) {
+inline bool send_message_with_length(tcp::socket& socket, const std::vector<unsigned char>& data) {
     uint32_t len = static_cast<uint32_t>(data.size());
 
     if (len > MAX_MESSAGE_SIZE) {
+        std::lock_guard<std::mutex> lock(console_mutex);
         std::cerr << "Error: Attempted to send message of size " << len << " which exceeds MAX_MESSAGE_SIZE (" << MAX_MESSAGE_SIZE << ").\n";
         return false;
     }
 
-    std::vector<unsigned char> len_bytes = to_network_byte_order(len);
+    try {
+        uint32_t network_length = asio::detail::socket_ops::host_to_network_long(len);
+        asio::write(socket, asio::buffer(&network_length, sizeof(network_length)));
 
-    int bytes_sent_len = send(sock, (char*)len_bytes.data(), len_bytes.size(), 0);
-    if (bytes_sent_len == SOCKET_ERROR || bytes_sent_len != len_bytes.size()) {
-        std::cerr << "Failed to send length prefix: " << WSAGetLastError() << "\n";
+        asio::write(socket, asio::buffer(data));
+        return true;
+    }
+    catch (const boost::system::system_error& e) {
+        std::lock_guard<std::mutex> lock(console_mutex);
+        std::cerr << "Network Error (send_message_with_length): " << e.what() << std::endl;
         return false;
     }
-
-    size_t total_data_sent = 0;
-    while (total_data_sent < len) {
-        int sent = send(sock, (char*)data.data() + total_data_sent, (int)(len - total_data_sent), 0);
-        if (sent == SOCKET_ERROR) {
-            std::cerr << "Failed to send data: " << WSAGetLastError() << "\n";
-            return false;
-        }
-        total_data_sent += sent;
-    }
-    return true;
 }
 
-inline std::vector<unsigned char> recv_message_with_length(SOCKET sock) {
-    unsigned char len_buf[4];
-    int bytes_received_len = 0;
-    int current_recv_len = 0;
+inline std::vector<unsigned char> recv_message_with_length(tcp::socket& socket) {
+    try {
+        uint32_t network_length;
+        asio::read(socket, asio::buffer(&network_length, sizeof(network_length)));
+        uint32_t length = asio::detail::socket_ops::network_to_host_long(network_length);
 
-    while (bytes_received_len < 4) {
-        current_recv_len = recv(sock, (char*)len_buf + bytes_received_len, 4 - bytes_received_len, 0);
-        if (current_recv_len <= 0) {
-            if (current_recv_len < 0) {
-                std::cerr << "Failed to receive length prefix: " << WSAGetLastError() << "\n";
-            }
+        if (length == 0) {
             return {};
         }
-        bytes_received_len += current_recv_len;
-    }
 
-    uint32_t expected_data_len = from_network_byte_order(len_buf);
-
-    if (expected_data_len == 0) {
-        return {};
-    }
-
-    if (expected_data_len > MAX_MESSAGE_SIZE) {
-        std::cerr << "Error: Incoming message size (" << expected_data_len << ") exceeds MAX_MESSAGE_SIZE (" << MAX_MESSAGE_SIZE << "). Disconnecting.\n";
-        return {};
-    }
-
-    std::vector<unsigned char> received_data;
-    received_data.reserve(expected_data_len);
-
-    size_t total_data_received = 0;
-    char temp_buf[BUF_SIZE];
-
-    while (total_data_received < expected_data_len) {
-        size_t remaining_to_recv = expected_data_len - total_data_received;
-        int to_recv = (int)std::min((size_t)BUF_SIZE, remaining_to_recv);
-
-        int received_chunk = recv(sock, temp_buf, to_recv, 0);
-
-        if (received_chunk <= 0) {
-            if (received_chunk < 0) {
-                std::cerr << "Failed to receive data chunk: " << WSAGetLastError() << "\n";
-            }
+        if (length > MAX_MESSAGE_SIZE) {
+            std::lock_guard<std::mutex> lock(console_mutex);
+            std::cerr << "Error: Incoming message size (" << length << ") exceeds MAX_MESSAGE_SIZE (" << MAX_MESSAGE_SIZE << "). Disconnecting.\n";
             return {};
         }
-        received_data.insert(received_data.end(), temp_buf, temp_buf + received_chunk);
-        total_data_received += received_chunk;
+
+        std::vector<unsigned char> data(length);
+        asio::read(socket, asio::buffer(data));
+        return data;
     }
-    return received_data;
+    catch (const boost::system::system_error& e) {
+        if (e.code() == asio::error::eof) {
+            std::lock_guard<std::mutex> lock(console_mutex);
+            std::cout << "Network Info (recv_message_with_length): Peer disconnected gracefully." << std::endl;
+        }
+        else {
+            std::lock_guard<std::mutex> lock(console_mutex);
+            std::cerr << "Network Error (recv_message_with_length): " << e.what() << std::endl;
+        }
+        return {};
+    }
 }
 
 inline std::vector<unsigned char> generateRandomKey(size_t length) {
@@ -249,3 +214,5 @@ inline std::vector<unsigned char> generateRandomKey(size_t length) {
     rng.GenerateBlock(key.data(), key.size());
     return key;
 }
+
+#endif

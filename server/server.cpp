@@ -1,21 +1,37 @@
 #include "../common.h"
 #include "server.h"
-#include <winsock2.h>
-#include <iphlpapi.h>
-#include <icmpapi.h>
-#include <ws2tcpip.h>
+#include <boost/asio.hpp>
+#include <thread>
+#include <vector>
+#include <set>
+#include <map>
+#include <memory>
+#include <algorithm>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <random>
+#include <sstream>
 
-#pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "iphlpapi.lib")
+#include <cryptopp/aes.h>
+#include <cryptopp/gcm.h>
+#include <cryptopp/filters.h>
+#include <cryptopp/osrng.h>
+#include <cryptopp/rsa.h>
+#include <cryptopp/base64.h>
+#include <cryptopp/modes.h>
+
+namespace asio = boost::asio;
+using tcp = asio::ip::tcp;
 
 static auto serverStartTime = std::chrono::steady_clock::now();
 
-std::map<SOCKET, std::pair<std::string, std::shared_ptr<SimpleAES>>> onlineUsers;
+std::map<std::shared_ptr<tcp::socket>, std::pair<std::string, std::shared_ptr<SimpleAES>>> onlineUsers;
 std::mutex onlineUsers_mutex;
 
 struct Channel {
     std::string name;
-    std::map<SOCKET, std::string> members;
+    std::map<std::shared_ptr<tcp::socket>, std::string> members;
     std::mutex mutex;
 
     Channel(std::string n) : name(std::move(n)) {}
@@ -27,43 +43,45 @@ std::mutex channels_mutex;
 CryptoPP::RSA::PrivateKey rsaPrivateKey;
 CryptoPP::RSA::PublicKey rsaPublicKey;
 
-void generateRSAKeys()
-{
+void generateRSAKeys() {
     CryptoPP::AutoSeededRandomPool rng;
     rsaPrivateKey.GenerateRandomWithKeySize(rng, 2048);
     rsaPublicKey = CryptoPP::RSA::PublicKey(rsaPrivateKey);
 
+    std::lock_guard<std::mutex> lock(console_mutex);
     std::cout << "Server: RSA keys generated. Public key modulus size: "
         << rsaPublicKey.GetModulus().ByteCount() * 8 << " bits.\n";
 }
 
-void sendMessageToClient(SOCKET clientSocket, const std::string& message) {
+void sendMessageToClient(std::shared_ptr<tcp::socket> clientSocketPtr, const std::string& message) {
     std::shared_ptr<SimpleAES> clientAesCipher;
     {
         std::lock_guard<std::mutex> lock(onlineUsers_mutex);
-        auto it = onlineUsers.find(clientSocket);
+        auto it = onlineUsers.find(clientSocketPtr);
         if (it != onlineUsers.end()) {
             clientAesCipher = it->second.second;
         }
     }
 
-    if (clientAesCipher) {
+    if (clientAesCipher && clientSocketPtr->is_open()) {
         try {
             std::vector<unsigned char> responseBytes(message.begin(), message.end());
             std::vector<unsigned char> encryptedResponse = clientAesCipher->encrypt(responseBytes);
-            if (!send_message_with_length(clientSocket, encryptedResponse)) {
+            if (!send_message_with_length(*clientSocketPtr, encryptedResponse)) {
                 std::lock_guard<std::mutex> lock(console_mutex);
-                std::cerr << "Server: Error sending message to socket " << clientSocket << ". Error Code: " << WSAGetLastError() << "\n";
+                std::cerr << "Server: Error sending message to socket " << clientSocketPtr->remote_endpoint().address().to_string()
+                    << ":" << clientSocketPtr->remote_endpoint().port() << ". Socket might be closed.\n";
             }
         }
         catch (const std::exception& e) {
             std::lock_guard<std::mutex> lock(console_mutex);
-            std::cerr << "Server: Exception encrypting/sending message to socket " << clientSocket << ": " << e.what() << "\n";
+            std::cerr << "Server: Exception encrypting/sending message to socket " << clientSocketPtr->remote_endpoint().address().to_string()
+                << ":" << clientSocketPtr->remote_endpoint().port() << ": " << e.what() << "\n";
         }
     }
 }
 
-void broadcastToChannel(const std::string& channelName, const std::string& message, SOCKET senderSocket = INVALID_SOCKET) {
+void broadcastToChannel(const std::string& channelName, const std::string& message, std::shared_ptr<tcp::socket> senderSocketPtr = nullptr) {
     std::shared_ptr<Channel> targetChannel;
     {
         std::lock_guard<std::mutex> lock(channels_mutex);
@@ -76,44 +94,40 @@ void broadcastToChannel(const std::string& channelName, const std::string& messa
     if (targetChannel) {
         std::lock_guard<std::mutex> channelLock(targetChannel->mutex);
         for (const auto& memberPair : targetChannel->members) {
-            if (memberPair.first != senderSocket) {
+            if (memberPair.first != senderSocketPtr) {
                 sendMessageToClient(memberPair.first, message);
             }
         }
     }
 }
 
-void handleClient(SOCKET clientSocket) {
+void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
     std::string clientUsername = "Unknown";
     bool client_setup_successful = false;
     std::vector<std::string> joinedChannels;
-
-    CryptoPP::AutoSeededRandomPool rng;
 
     std::string encodedPubKey;
     CryptoPP::Base64Encoder encoder(new CryptoPP::StringSink(encodedPubKey), false);
     rsaPublicKey.DEREncode(encoder);
     encoder.MessageEnd();
 
-    size_t totalSent = 0;
-    size_t remaining = encodedPubKey.size();
-    const char* dataPtr = encodedPubKey.data();
-
-    while (remaining > 0) {
-        int sent = send(clientSocket, dataPtr + totalSent, (int)remaining, 0);
-        if (sent == SOCKET_ERROR) {
-            std::cerr << "Server: failed to send public key fully. Error: " << WSAGetLastError() << "\n";
-            closesocket(clientSocket);
-            return;
-        }
-        totalSent += sent;
-        remaining -= sent;
+    try {
+        asio::write(*clientSocketPtr, asio::buffer(encodedPubKey + "\n"));
+    }
+    catch (const boost::system::system_error& e) {
+        std::lock_guard<std::mutex> lock(console_mutex);
+        std::cerr << "Server: failed to send public key fully to " << clientSocketPtr->remote_endpoint().address().to_string()
+            << ":" << clientSocketPtr->remote_endpoint().port() << ". Error: " << e.what() << "\n";
+        clientSocketPtr->close();
+        return;
     }
 
-    std::vector<unsigned char> encryptedAESKeyVec = recv_message_with_length(clientSocket);
+    std::vector<unsigned char> encryptedAESKeyVec = recv_message_with_length(*clientSocketPtr);
     if (encryptedAESKeyVec.empty()) {
-        std::cerr << "Server: Failed to receive encrypted AES key or client disconnected during key exchange.\n";
-        closesocket(clientSocket);
+        std::lock_guard<std::mutex> lock(console_mutex);
+        std::cerr << "Server: Failed to receive encrypted AES key or client disconnected during key exchange from " << clientSocketPtr->remote_endpoint().address().to_string()
+            << ":" << clientSocketPtr->remote_endpoint().port() << ".\n";
+        clientSocketPtr->close();
         return;
     }
     std::string encryptedAESKeyStr(encryptedAESKeyVec.begin(), encryptedAESKeyVec.end());
@@ -124,10 +138,12 @@ void handleClient(SOCKET clientSocket) {
         CryptoPP::AutoSeededRandomPool rng_local;
 
         if (encryptedAESKeyStr.size() != decryptor.FixedCiphertextLength()) {
+            std::lock_guard<std::mutex> lock(console_mutex);
             std::cerr << "Server: Error: Received encrypted AES key size (" << encryptedAESKeyStr.size()
                 << " bytes) does not match expected RSA ciphertext length ("
-                << decryptor.FixedCiphertextLength() << " bytes).\n";
-            closesocket(clientSocket);
+                << decryptor.FixedCiphertextLength() << " bytes) from " << clientSocketPtr->remote_endpoint().address().to_string()
+                << ":" << clientSocketPtr->remote_endpoint().port() << ".\n";
+            clientSocketPtr->close();
             return;
         }
 
@@ -136,24 +152,32 @@ void handleClient(SOCKET clientSocket) {
                 new CryptoPP::StringSink(decryptedAESKey)));
 
         if (decryptedAESKey.size() != 32) {
-            std::cerr << "Server: Warning: Decrypted AES key has unexpected size: " << decryptedAESKey.size() << " bytes. Expected 32 for AES-256.\n";
-            closesocket(clientSocket);
+            std::lock_guard<std::mutex> lock(console_mutex);
+            std::cerr << "Server: Warning: Decrypted AES key has unexpected size: " << decryptedAESKey.size() << " bytes. Expected 32 for AES-256 from " << clientSocketPtr->remote_endpoint().address().to_string()
+                << ":" << clientSocketPtr->remote_endpoint().port() << ".\n";
+            clientSocketPtr->close();
             return;
         }
     }
     catch (const CryptoPP::Exception& e) {
-        std::cerr << "Server: Crypto++ Exception during AES key decryption: " << e.what() << "\n";
-        closesocket(clientSocket);
+        std::lock_guard<std::mutex> lock(console_mutex);
+        std::cerr << "Server: Crypto++ Exception during AES key decryption from " << clientSocketPtr->remote_endpoint().address().to_string()
+            << ":" << clientSocketPtr->remote_endpoint().port() << ": " << e.what() << "\n";
+        clientSocketPtr->close();
         return;
     }
     catch (const std::exception& e) {
-        std::cerr << "Server: Standard Exception during AES key decryption: " << e.what() << "\n";
-        closesocket(clientSocket);
+        std::lock_guard<std::mutex> lock(console_mutex);
+        std::cerr << "Server: Standard Exception during AES key decryption from " << clientSocketPtr->remote_endpoint().address().to_string()
+            << ":" << clientSocketPtr->remote_endpoint().port() << ": " << e.what() << "\n";
+        clientSocketPtr->close();
         return;
     }
     catch (...) {
-        std::cerr << "Server: Unknown Exception during AES key decryption.\n";
-        closesocket(clientSocket);
+        std::lock_guard<std::mutex> lock(console_mutex);
+        std::cerr << "Server: Unknown Exception during AES key decryption from " << clientSocketPtr->remote_endpoint().address().to_string()
+            << ":" << clientSocketPtr->remote_endpoint().port() << ".\n";
+        clientSocketPtr->close();
         return;
     }
 
@@ -162,17 +186,21 @@ void handleClient(SOCKET clientSocket) {
         clientAesCipher = std::make_shared<SimpleAES>(std::vector<unsigned char>(decryptedAESKey.begin(), decryptedAESKey.end()));
     }
     catch (const std::exception& e) {
-        std::cerr << "Server: Error initializing SimpleAES (GCM) for client: " << e.what() << "\n";
-        closesocket(clientSocket);
+        std::lock_guard<std::mutex> lock(console_mutex);
+        std::cerr << "Server: Error initializing SimpleAES (GCM) for client " << clientSocketPtr->remote_endpoint().address().to_string()
+            << ":" << clientSocketPtr->remote_endpoint().port() << ": " << e.what() << "\n";
+        clientSocketPtr->close();
         return;
     }
 
-    std::vector<unsigned char> encryptedUsername = recv_message_with_length(clientSocket);
+    // Receive encrypted username
+    std::vector<unsigned char> encryptedUsername = recv_message_with_length(*clientSocketPtr);
 
     if (encryptedUsername.empty()) {
         std::lock_guard<std::mutex> lock(console_mutex);
-        std::cerr << "Server: Error receiving username from client or client disconnected during username exchange.\n";
-        closesocket(clientSocket);
+        std::cerr << "Server: Error receiving username from client " << clientSocketPtr->remote_endpoint().address().to_string()
+            << ":" << clientSocketPtr->remote_endpoint().port() << " or client disconnected during username exchange.\n";
+        clientSocketPtr->close();
         return;
     }
 
@@ -182,17 +210,19 @@ void handleClient(SOCKET clientSocket) {
 
         {
             std::lock_guard<std::mutex> lock(console_mutex);
-            std::cout << "Server: Received username: '" << clientUsername << "'\n";
+            std::cout << "Server: Received username: '" << clientUsername << "' from " << clientSocketPtr->remote_endpoint().address().to_string()
+                << ":" << clientSocketPtr->remote_endpoint().port() << "\n";
         }
 
         std::string ackMessage = "Welcome, " + clientUsername + "! Type /CMDS for commands. Join a channel with /JOIN <channel_name>.";
         std::vector<unsigned char> ackBytes(ackMessage.begin(), ackMessage.end());
         std::vector<unsigned char> encryptedAck = clientAesCipher->encrypt(ackBytes);
 
-        if (!send_message_with_length(clientSocket, encryptedAck)) {
+        if (!send_message_with_length(*clientSocketPtr, encryptedAck)) {
             std::lock_guard<std::mutex> lock(console_mutex);
-            std::cerr << "Server: Error sending username ack to '" << clientUsername << "' (with length prefix): " << WSAGetLastError() << "\n";
-            closesocket(clientSocket);
+            std::cerr << "Server: Error sending username ack to '" << clientUsername << "' (with length prefix) " << clientSocketPtr->remote_endpoint().address().to_string()
+                << ":" << clientSocketPtr->remote_endpoint().port() << ".\n";
+            clientSocketPtr->close();
             return;
         }
         else {
@@ -201,19 +231,21 @@ void handleClient(SOCKET clientSocket) {
     }
     catch (const std::exception& e) {
         std::lock_guard<std::mutex> lock(console_mutex);
-        std::cerr << "Server: Exception during username decryption/welcome encryption (GCM error likely indicates tampering): " << e.what() << "\n";
-        closesocket(clientSocket);
+        std::cerr << "Server: Exception during username decryption/welcome encryption (GCM error likely indicates tampering) from " << clientSocketPtr->remote_endpoint().address().to_string()
+            << ":" << clientSocketPtr->remote_endpoint().port() << ": " << e.what() << "\n";
+        clientSocketPtr->close();
         return;
     }
 
     if (client_setup_successful) {
         {
             std::lock_guard<std::mutex> lock(onlineUsers_mutex);
-            onlineUsers[clientSocket] = { clientUsername, clientAesCipher };
+            onlineUsers[clientSocketPtr] = { clientUsername, clientAesCipher };
         }
         {
             std::lock_guard<std::mutex> lock(console_mutex);
-            std::cout << "Server: Client '" << clientUsername << "' (Socket: " << clientSocket << ") added to online users list.\n";
+            std::cout << "Server: Client '" << clientUsername << "' (Socket: " << clientSocketPtr->remote_endpoint().address().to_string()
+                << ":" << clientSocketPtr->remote_endpoint().port() << ") added to online users list.\n";
             std::cout << "Server: Client '" << clientUsername << "' connected, ready to receive encrypted data.\n";
         }
 
@@ -222,15 +254,19 @@ void handleClient(SOCKET clientSocket) {
         std::uniform_int_distribution<> distrib(1, 100);
 
         do {
-            std::vector<unsigned char> encryptedData = recv_message_with_length(clientSocket);
+            std::vector<unsigned char> encryptedData = recv_message_with_length(*clientSocketPtr);
 
             if (encryptedData.empty()) {
                 std::lock_guard<std::mutex> lock(console_mutex);
-                if (WSAGetLastError() == 0) {
-                    std::cout << "Server: Client '" << clientUsername << "' disconnected gracefully.\n";
+                boost::system::error_code ec;
+                clientSocketPtr->remote_endpoint(ec);
+                if (ec == boost::asio::error::eof || ec == boost::asio::error::bad_descriptor) {
+                    std::cout << "Server: Client '" << clientUsername << "' disconnected gracefully from " << clientSocketPtr->remote_endpoint().address().to_string()
+                        << ":" << clientSocketPtr->remote_endpoint().port() << ".\n";
                 }
                 else {
-                    std::cout << "Server: recv error from '" << clientUsername << "' (with length prefix). Error Code: " << WSAGetLastError() << "\n";
+                    std::cout << "Server: recv error from '" << clientUsername << "' (with length prefix) " << clientSocketPtr->remote_endpoint().address().to_string()
+                        << ":" << clientSocketPtr->remote_endpoint().port() << ". Error Code: " << ec.message() << "\n";
                 }
                 break;
             }
@@ -245,68 +281,27 @@ void handleClient(SOCKET clientSocket) {
 
                 {
                     std::lock_guard<std::mutex> lock(console_mutex);
-                    std::cout << "Server received " << encryptedData.size() << " bytes from '" << clientUsername << "'. Decrypted command: '" << decryptedCommand << "'\n";
+                    std::cout << "Server received " << encryptedData.size() << " bytes from '" << clientUsername << "' (" << clientSocketPtr->remote_endpoint().address().to_string()
+                        << ":" << clientSocketPtr->remote_endpoint().port() << "). Decrypted command: '" << decryptedCommand << "'\n";
                 }
 
                 std::string responseMessage;
 
                 if (processedCommand == "PING") {
-                    SOCKADDR_IN clientAddr;
-                    int clientAddrLen = sizeof(clientAddr);
-                    getpeername(clientSocket, (SOCKADDR*)&clientAddr, &clientAddrLen);
-                    IPAddr ipAddress = clientAddr.sin_addr.S_un.S_addr;
-
-                    HANDLE hIcmpFile = IcmpCreateFile();
-                    if (hIcmpFile == INVALID_HANDLE_VALUE) {
-                        responseMessage = "Server: Could not create ICMP handle.";
-                        std::lock_guard<std::mutex> lock(console_mutex);
-                        std::cerr << "Server: IcmpCreateFile failed: " << GetLastError() << "\n";
-                    }
-                    else {
-                        char sendData[] = "PingData";
-                        int requestSize = sizeof(sendData);
-
-                        std::vector<char> replyBuffer(sizeof(ICMP_ECHO_REPLY) + requestSize);
-
-                        DWORD timeout = 1000;
-
-                        DWORD dwRetVal = IcmpSendEcho(
-                            hIcmpFile,
-                            ipAddress,
-                            sendData,
-                            requestSize,
-                            NULL,
-                            replyBuffer.data(),
-                            static_cast<DWORD>(replyBuffer.size()),
-                            timeout
-                        );
-
-                        if (dwRetVal != 0) {
-                            PICMP_ECHO_REPLY pEchoReply = (PICMP_ECHO_REPLY)replyBuffer.data();
-                            if (pEchoReply->Status == IP_SUCCESS) {
-                                responseMessage = "Ping RTT: " + std::to_string(pEchoReply->RoundTripTime) + "ms";
-                            }
-                            else {
-                                responseMessage = "Ping failed with status: " + std::to_string(pEchoReply->Status);
-                            }
-                        }
-                        else {
-                            responseMessage = "Ping timed out or failed. Error: " + std::to_string(GetLastError());
-                        }
-                        IcmpCloseHandle(hIcmpFile);
-                    }
+                    responseMessage = "ill do it later";
                 }
                 else if (processedCommand == "TIME") {
                     std::time_t now_time_t = std::time(nullptr);
                     std::tm ltm_buf;
-                    errno_t err = localtime_s(&ltm_buf, &now_time_t);
+                    std::tm* result_tm = std::localtime(&now_time_t);
 
-                    if (err != 0) {
+                    if (result_tm == nullptr) {
                         responseMessage = "Error getting server time.";
                         std::lock_guard<std::mutex> lock(console_mutex);
-                        std::cerr << "Server: localtime_s failed with error: " << err << "\n";
+                        std::cerr << "Server: std::localtime failed.\n";
                     }
                     else {
+                        ltm_buf = *result_tm;
                         std::stringstream ss;
                         ss << std::put_time(&ltm_buf, "%Y-%m-%d %H:%M:%S");
                         responseMessage = ss.str();
@@ -400,12 +395,17 @@ void handleClient(SOCKET clientSocket) {
                             bool isMember = false;
                             {
                                 std::lock_guard<std::mutex> channelLock(targetChannel->mutex);
-                                isMember = targetChannel->members.count(clientSocket);
+                                for (const auto& member : targetChannel->members) {
+                                    if (member.first == clientSocketPtr) {
+                                        isMember = true;
+                                        break;
+                                    }
+                                }
                             }
 
                             if (isMember) {
                                 std::string fullChannelMessage = "[" + targetChannelName + "] <" + clientUsername + ">: " + messageContent;
-                                broadcastToChannel(targetChannelName, fullChannelMessage, clientSocket);
+                                broadcastToChannel(targetChannelName, fullChannelMessage, clientSocketPtr);
                                 responseMessage = "Message sent to channel #" + targetChannelName + ".";
                             }
                             else {
@@ -428,7 +428,7 @@ void handleClient(SOCKET clientSocket) {
                         std::string targetUsername = fullMsgArgs.substr(0, firstSpace);
                         std::string messageContent = fullMsgArgs.substr(firstSpace + 1);
 
-                        SOCKET targetSocket = INVALID_SOCKET;
+                        std::shared_ptr<tcp::socket> targetSocketPtr = nullptr;
                         std::shared_ptr<SimpleAES> targetAesCipher = nullptr;
                         std::string senderResponseMessage;
 
@@ -436,15 +436,15 @@ void handleClient(SOCKET clientSocket) {
                             std::lock_guard<std::mutex> lock(onlineUsers_mutex);
                             for (const auto& pair : onlineUsers) {
                                 if (pair.second.first == targetUsername) {
-                                    targetSocket = pair.first;
+                                    targetSocketPtr = pair.first;
                                     targetAesCipher = pair.second.second;
                                     break;
                                 }
                             }
                         }
 
-                        if (targetSocket != INVALID_SOCKET) {
-                            if (targetSocket == clientSocket) {
+                        if (targetSocketPtr) {
+                            if (targetSocketPtr == clientSocketPtr) {
                                 senderResponseMessage = "Error: You cannot send a private message to yourself.";
                             }
                             else if (!targetAesCipher) {
@@ -458,9 +458,10 @@ void handleClient(SOCKET clientSocket) {
                                     std::vector<unsigned char>(messageToRecipient.begin(), messageToRecipient.end())
                                 );
 
-                                if (!send_message_with_length(targetSocket, encryptedMessage)) {
+                                if (!send_message_with_length(*targetSocketPtr, encryptedMessage)) {
                                     std::lock_guard<std::mutex> lock(console_mutex);
-                                    std::cerr << "Server: Error sending message to '" << targetUsername << "' (Socket: " << targetSocket << ") with length prefix: " << WSAGetLastError() << "\n";
+                                    std::cerr << "Server: Error sending message to '" << targetUsername << "' (Socket: " << targetSocketPtr->remote_endpoint().address().to_string()
+                                        << ":" << targetSocketPtr->remote_endpoint().port() << ") with length prefix.\n";
                                     senderResponseMessage = "Error: Could not send message to '" + targetUsername + "'. They might have disconnected.";
                                 }
                                 else {
@@ -507,8 +508,16 @@ void handleClient(SOCKET clientSocket) {
 
                         {
                             std::lock_guard<std::mutex> channelLock(channel->mutex);
-                            if (channel->members.count(clientSocket) == 0) {
-                                channel->members[clientSocket] = clientUsername;
+                            bool alreadyMember = false;
+                            for (const auto& member : channel->members) {
+                                if (member.first == clientSocketPtr) {
+                                    alreadyMember = true;
+                                    break;
+                                }
+                            }
+
+                            if (!alreadyMember) {
+                                channel->members[clientSocketPtr] = clientUsername;
                                 joinedChannels.push_back(channelName);
                                 responseMessage = "Joined channel #" + channelName + ".";
                                 joinBroadcastMessage = clientUsername + " has joined #" + channelName + ".";
@@ -519,7 +528,7 @@ void handleClient(SOCKET clientSocket) {
                         }
 
                         if (!joinBroadcastMessage.empty()) {
-                            broadcastToChannel(channelName, joinBroadcastMessage, clientSocket);
+                            broadcastToChannel(channelName, joinBroadcastMessage, clientSocketPtr);
                         }
                         if (newChannelCreated) {
                             std::lock_guard<std::mutex> lock(console_mutex);
@@ -542,6 +551,7 @@ void handleClient(SOCKET clientSocket) {
                         else {
                             std::string leaveConfirmation = "Left channels: ";
                             std::vector<std::string> channelsToCleanUp;
+                            std::vector<std::string> channelsLeftSuccessfully;
 
                             for (const std::string& channelToLeave : joinedChannels) {
                                 std::shared_ptr<Channel> channel;
@@ -558,18 +568,29 @@ void handleClient(SOCKET clientSocket) {
                                     bool channelBecameEmpty = false;
                                     {
                                         std::lock_guard<std::mutex> channelLock(channel->mutex);
-                                        channel->members.erase(clientSocket);
+                                        bool wasMember = false;
+                                        for (auto it_member = channel->members.begin(); it_member != channel->members.end(); ++it_member) {
+                                            if (it_member->first == clientSocketPtr) {
+                                                channel->members.erase(it_member);
+                                                wasMember = true;
+                                                break;
+                                            }
+                                        }
                                         if (channel->members.empty()) {
                                             channelBecameEmpty = true;
                                         }
+                                        if (wasMember) {
+                                            channelsLeftSuccessfully.push_back(channelToLeave);
+                                        }
                                     }
 
-                                    broadcastToChannel(channelToLeave, leaveBroadcastMessage, clientSocket);
+                                    if (std::find(channelsLeftSuccessfully.begin(), channelsLeftSuccessfully.end(), channelToLeave) != channelsLeftSuccessfully.end()) {
+                                        broadcastToChannel(channelToLeave, leaveBroadcastMessage);
+                                    }
 
                                     if (channelBecameEmpty) {
                                         channelsToCleanUp.push_back(channelToLeave);
                                     }
-                                    leaveConfirmation += "#" + channelToLeave + " ";
                                 }
                             }
 
@@ -578,16 +599,24 @@ void handleClient(SOCKET clientSocket) {
                                 for (const std::string& emptyChannel : channelsToCleanUp) {
                                     channels.erase(emptyChannel);
                                     std::lock_guard<std::mutex> consoleLock(console_mutex);
-                                    std::cout << "Server: Channel #" << emptyChannel << " is now empty and removed.\n";
+                                    std::cout << "Server: Channel #" << emptyChannel << " is now empty and removed (client disconnect cleanup).\n";
                                 }
                             }
                             joinedChannels.clear();
-                            responseMessage = leaveConfirmation;
+                            for (const std::string& ch : channelsLeftSuccessfully) {
+                                leaveConfirmation += "#" + ch + " ";
+                            }
+                            if (channelsLeftSuccessfully.empty()) {
+                                responseMessage = "You were not a member of any of the specified channels.";
+                            }
+                            else {
+                                responseMessage = leaveConfirmation;
+                            }
                         }
                     }
                     else {
-                        auto it = std::find(joinedChannels.begin(), joinedChannels.end(), channelNameArg);
-                        if (it != joinedChannels.end()) {
+                        auto it_joined = std::find(joinedChannels.begin(), joinedChannels.end(), channelNameArg);
+                        if (it_joined != joinedChannels.end()) {
                             std::shared_ptr<Channel> channel;
                             {
                                 std::lock_guard<std::mutex> lock(channels_mutex);
@@ -602,13 +631,25 @@ void handleClient(SOCKET clientSocket) {
                                 bool channelBecameEmpty = false;
                                 {
                                     std::lock_guard<std::mutex> channelLock(channel->mutex);
-                                    channel->members.erase(clientSocket);
+                                    bool wasMember = false;
+                                    for (auto it_member = channel->members.begin(); it_member != channel->members.end(); ++it_member) {
+                                        if (it_member->first == clientSocketPtr) {
+                                            channel->members.erase(it_member);
+                                            wasMember = true;
+                                            break;
+                                        }
+                                    }
                                     if (channel->members.empty()) {
                                         channelBecameEmpty = true;
                                     }
+                                    if (!wasMember) {
+                                        responseMessage = "Error: You are not a member of channel #" + channelNameArg + ".";
+                                    }
                                 }
 
-                                broadcastToChannel(channelNameArg, leaveBroadcastMessage, clientSocket);
+                                if (responseMessage.empty()) {
+                                    broadcastToChannel(channelNameArg, leaveBroadcastMessage);
+                                }
 
                                 if (channelBecameEmpty) {
                                     std::lock_guard<std::mutex> lock(channels_mutex);
@@ -616,11 +657,13 @@ void handleClient(SOCKET clientSocket) {
                                     std::lock_guard<std::mutex> consoleLock(console_mutex);
                                     std::cout << "Server: Channel #" << channelNameArg << " is now empty and removed.\n";
                                 }
-                                joinedChannels.erase(it);
-                                responseMessage = "Left channel #" + channelNameArg + ".";
+                                if (responseMessage.empty()) {
+                                    joinedChannels.erase(it_joined);
+                                    responseMessage = "Left channel #" + channelNameArg + ".";
+                                }
                             }
                             else {
-                                responseMessage = "Error: Channel #" + channelNameArg + " not found (internal error).";
+                                responseMessage = "Error: Channel #" + channelNameArg + " does not exist.";
                             }
                         }
                         else {
@@ -629,20 +672,20 @@ void handleClient(SOCKET clientSocket) {
                     }
                 }
                 else if (processedCommand == "LIST") {
+                    std::string channelListString = "--- Active Channels ---\n";
                     std::lock_guard<std::mutex> lock(channels_mutex);
                     if (channels.empty()) {
-                        responseMessage = "No active channels.";
+                        channelListString = "No active channels.";
                     }
                     else {
-                        responseMessage = "--- Active Channels ---\n";
                         for (const auto& pair : channels) {
-                            std::lock_guard<std::mutex> channelLock(pair.second->mutex);
-                            responseMessage += "#" + pair.first + " (" + std::to_string(pair.second->members.size()) + " users)\n";
+                            channelListString += "- #" + pair.first + "\n";
                         }
-                        if (responseMessage.back() == '\n') {
-                            responseMessage.pop_back();
+                        if (channelListString.back() == '\n') {
+                            channelListString.pop_back();
                         }
                     }
+                    responseMessage = channelListString;
                 }
                 else if (processedCommand.rfind("WHO ", 0) == 0 && processedCommand.length() > 4) {
                     std::string channelName = decryptedCommand.substr(processedCommand.find("WHO ") + 4);
@@ -659,206 +702,110 @@ void handleClient(SOCKET clientSocket) {
                     }
 
                     if (targetChannel) {
+                        std::string memberListString = "--- Members in #" + channelName + " ---\n";
                         std::lock_guard<std::mutex> channelLock(targetChannel->mutex);
                         if (targetChannel->members.empty()) {
-                            responseMessage = "Channel #" + channelName + " has no members.";
+                            memberListString = "Channel #" + channelName + " has no members.";
                         }
                         else {
-                            responseMessage = "--- Users in #" + channelName + " ---\n";
                             for (const auto& memberPair : targetChannel->members) {
-                                responseMessage += "- " + memberPair.second + "\n";
+                                memberListString += "- " + memberPair.second + "\n";
                             }
-                            if (responseMessage.back() == '\n') {
-                                responseMessage.pop_back();
+                            if (memberListString.back() == '\n') {
+                                memberListString.pop_back();
                             }
                         }
+                        responseMessage = memberListString;
                     }
                     else {
                         responseMessage = "Error: Channel #" + channelName + " does not exist.";
                     }
                 }
                 else {
-                    responseMessage = "?";
+                    responseMessage = "Unknown command: '" + decryptedCommand + "'. Type /CMDS for a list of commands.";
                 }
 
-                std::vector<unsigned char> responseBytes(responseMessage.begin(), responseMessage.end());
-                std::vector<unsigned char> encryptedResponse = clientAesCipher->encrypt(responseBytes);
+                if (!responseMessage.empty()) {
+                    sendMessageToClient(clientSocketPtr, responseMessage);
+                }
 
-                if (!send_message_with_length(clientSocket, encryptedResponse)) {
-                    std::lock_guard<std::mutex> lock(console_mutex);
-                    std::cerr << "Server: send error to '" << clientUsername << "' (with length prefix). Error Code: " << WSAGetLastError() << "\n";
-                    break;
-                }
-                else {
-                    std::lock_guard<std::mutex> lock(console_mutex);
-                    std::cout << "Server: Sent encrypted response (" << encryptedResponse.size() << " bytes) for command '" << decryptedCommand << "' to '" << clientUsername << "'.\n";
-                }
+            }
+            catch (const CryptoPP::Exception& e) {
+                std::lock_guard<std::mutex> lock(console_mutex);
+                std::cerr << "Server: Crypto++ Exception during decryption from '" << clientUsername << "' (" << clientSocketPtr->remote_endpoint().address().to_string()
+                    << ":" << clientSocketPtr->remote_endpoint().port() << "): " << e.what() << "\n";
+                sendMessageToClient(clientSocketPtr, "Error: Failed to decrypt message. Possible tampering or key mismatch.");
             }
             catch (const std::exception& e) {
                 std::lock_guard<std::mutex> lock(console_mutex);
-                std::cerr << "Server: Exception during command decryption/response encryption for '" << clientUsername << "' (GCM error likely indicates tampering): " << e.what() << "\n";
-                break;
+                std::cerr << "Server: Standard Exception during command processing from '" << clientUsername << "' (" << clientSocketPtr->remote_endpoint().address().to_string()
+                    << ":" << clientSocketPtr->remote_endpoint().port() << "): " << e.what() << "\n";
+                sendMessageToClient(clientSocketPtr, "Error processing your command.");
             }
-
-        } while (true);
+        } while (clientSocketPtr->is_open());
     }
 
-    if (client_setup_successful) {
-        {
-            std::lock_guard<std::mutex> lock(onlineUsers_mutex);
-            onlineUsers.erase(clientSocket);
-        }
-        {
-            std::lock_guard<std::mutex> lock(console_mutex);
-            std::cout << "Server: Client '" << clientUsername << "' (Socket: " << clientSocket << ") removed from online users list.\n";
-        }
+    {
+        std::lock_guard<std::mutex> lock(onlineUsers_mutex);
+        onlineUsers.erase(clientSocketPtr);
     }
-
-    std::vector<std::string> channelsToCleanUp;
-    for (const std::string& channelToLeave : joinedChannels) {
-        std::shared_ptr<Channel> channel;
-        {
-            std::lock_guard<std::mutex> lock(channels_mutex);
-            auto it = channels.find(channelToLeave);
-            if (it != channels.end()) {
-                channel = it->second;
-            }
-        }
-        if (channel) {
-            std::string leaveBroadcastMessage = clientUsername + " has left #" + channelToLeave + ".";
-            bool channelBecameEmpty = false;
-            {
-                std::lock_guard<std::mutex> channelLock(channel->mutex);
-                channel->members.erase(clientSocket);
-                if (channel->members.empty()) {
-                    channelBecameEmpty = true;
-                }
-            } // channelLock released
-
-            broadcastToChannel(channelToLeave, leaveBroadcastMessage, clientSocket);
-
-            if (channelBecameEmpty) {
-                channelsToCleanUp.push_back(channelToLeave);
-            }
-        }
+    {
+        std::lock_guard<std::mutex> lock(console_mutex);
+        std::cout << "Server: Client '" << clientUsername << "' (Socket: " << clientSocketPtr->remote_endpoint().address().to_string()
+            << ":" << clientSocketPtr->remote_endpoint().port() << ") removed from online users list.\n";
     }
 
     {
         std::lock_guard<std::mutex> lock(channels_mutex);
-        for (const std::string& emptyChannel : channelsToCleanUp) {
-            channels.erase(emptyChannel);
-            std::lock_guard<std::mutex> consoleLock(console_mutex);
-            std::cout << "Server: Channel #" << emptyChannel << " is now empty and removed (during client disconnect).\n";
+        for (const std::string& channelName : joinedChannels) {
+            auto it = channels.find(channelName);
+            if (it != channels.end()) {
+                std::shared_ptr<Channel> channel = it->second;
+                std::lock_guard<std::mutex> channelLock(channel->mutex);
+                bool wasMember = false;
+                for (auto it_member = channel->members.begin(); it_member != channel->members.end(); ++it_member) {
+                    if (it_member->first == clientSocketPtr) {
+                        channel->members.erase(it_member);
+                        wasMember = true;
+                        break;
+                    }
+                }
+                if (wasMember) {
+                    std::string leaveBroadcastMessage = clientUsername + " has left #" + channelName + ".";
+                    broadcastToChannel(channelName, leaveBroadcastMessage);
+                }
+                if (channel->members.empty()) {
+                    channels.erase(channelName);
+                    std::lock_guard<std::mutex> consoleLock(console_mutex);
+                    std::cout << "Server: Channel #" << channelName << " is now empty and removed (client disconnect cleanup).\n";
+                }
+            }
         }
     }
-
-    int iresult = shutdown(clientSocket, SD_SEND);
-    if (iresult == SOCKET_ERROR) {
-        std::lock_guard<std::mutex> lock(console_mutex);
-        std::cerr << "Server: shutdown error for client '" << clientUsername << "'. Error Code: " << WSAGetLastError() << "\n";
-    }
-    iresult = closesocket(clientSocket);
-    if (iresult == SOCKET_ERROR) {
-        std::lock_guard<std::mutex> lock(console_mutex);
-        std::cerr << "Server: closesocket error for client '" << clientUsername << "'. Error Code: " << WSAGetLastError() << "\n";
-    }
+    boost::system::error_code ec;
+    clientSocketPtr->shutdown(tcp::socket::shutdown_both, ec);
+    clientSocketPtr->close(ec);
 }
 
-
-int runServer(const std::string& port) {
-    WSADATA wsadata;
-    int iresult = WSAStartup(MAKEWORD(2, 2), &wsadata);
-    if (iresult != 0) {
-        std::cerr << "Error WSAStartup: " << iresult << "\n";
-        return 1;
-    }
-
+int runServer(int port) {
     generateRSAKeys();
 
-    SOCKET listener = INVALID_SOCKET;
-    struct addrinfo* result = NULL, * ptr = NULL, hints{};
+    try {
+        asio::io_context io_context;
+        tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), port));
 
-    ZeroMemory(&hints, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-    hints.ai_flags = AI_PASSIVE;
+        print_to_console(std::string("server: Listening on port ") + std::to_string(port) + "...");
 
-    iresult = getaddrinfo(NULL, port.c_str(), &hints, &result);
+        while (true) {
+            std::shared_ptr<tcp::socket> socket_ptr = std::make_shared<tcp::socket>(io_context);
+            acceptor.accept(*socket_ptr);
 
-    if (iresult != 0) {
-        std::cerr << "Error getaddrinfo: " << iresult << "\n";
-        WSACleanup();
+            std::thread(handleClient, socket_ptr).detach();
+        }
+    }
+    catch (const boost::system::system_error& e) {
+        print_to_console(std::string("server: Error: ") + e.what());
         return 1;
     }
-
-    for (ptr = result; ptr != NULL; ptr = ptr->ai_next) {
-        listener = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
-
-        if (listener == INVALID_SOCKET) {
-            std::cerr << "Error creating socket: " << WSAGetLastError() << "\n";
-            continue;
-        }
-        auto optval = 1;
-        iresult = setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, (char*)&optval, sizeof(optval));
-
-        if (iresult == SOCKET_ERROR) {
-            std::cerr << "Error calling setsockopt: " << WSAGetLastError() << "\n";
-            closesocket(listener);
-            WSACleanup();
-            return 1;
-        }
-
-        iresult = bind(listener, ptr->ai_addr, (int)ptr->ai_addrlen);
-
-        if (iresult == SOCKET_ERROR) {
-            std::cerr << "Error binding to addr: " << WSAGetLastError() << "\n";
-            closesocket(listener);
-            listener = INVALID_SOCKET;
-            continue;
-        }
-        else {
-            break;
-        }
-    }
-
-    if (listener == INVALID_SOCKET) {
-        std::cerr << "Found no addresses to bind to\n";
-        WSACleanup();
-        return 1;
-    }
-    freeaddrinfo(result);
-
-    iresult = listen(listener, SOMAXCONN);
-
-    if (iresult == SOCKET_ERROR) {
-        std::cerr << "Failed calling listen on socket: " << WSAGetLastError() << "\n";
-        closesocket(listener);
-        WSACleanup();
-        return 1;
-    }
-
-    std::cout << "Server: Listening on port " << port << std::endl;
-
-    while (true) {
-        SOCKET clientsock = INVALID_SOCKET;
-
-        std::cout << "Server: Waiting for a new client connection...\n";
-        clientsock = accept(listener, NULL, NULL);
-
-        if (clientsock == INVALID_SOCKET) {
-            std::cerr << "Failed accepting socket: " << WSAGetLastError() << "\n";
-            continue;
-        }
-
-        std::thread clientThread(handleClient, clientsock);
-        clientThread.detach();
-    }
-
-    iresult = closesocket(listener);
-    if (iresult == SOCKET_ERROR) {
-        std::cerr << "Server: closesocket error for listener: " << WSAGetLastError() << "\n";
-    }
-    WSACleanup();
     return 0;
 }

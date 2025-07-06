@@ -1,17 +1,16 @@
-#define NOMINMAX
 #include "common.h"
 #include "server/server.h"
 #include "client/client.h"
+#include <iostream>
+#include <string>
 #include <limits>
 
-int main(int argc, char* argv[]) {
-    WSADATA wsaData;
-    int iresult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (iresult != 0) {
-        std::cerr << "main: WSAStartup failed: " << iresult << std::endl;
-        return 1;
-    }
+std::mutex console_mutex;
+std::queue<std::string> incoming_messages_queue;
+std::mutex incoming_messages_mutex;
+std::condition_variable incoming_messages_cv;
 
+int main(int argc, char* argv[]) {
     int app_result = 0;
 
     if (argc < 2) {
@@ -58,8 +57,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    std::cout << "main: cleaning up winsock..." << std::endl;
-    WSACleanup();
+    std::cout << "main: application exiting..." << std::endl;
 
     return app_result;
 }

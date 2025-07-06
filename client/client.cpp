@@ -1,32 +1,58 @@
+// client/client.cpp
 #include "../common.h"
 #include "client.h"
+#include <boost/asio.hpp>
 #include <thread>
 #include <atomic>
 #include <queue>
 #include <mutex>
 #include <condition_variable>
+#include <memory> // For std::shared_ptr
+
+// CryptoPP includes (already in common.h)
+#include <cryptopp/aes.h>
+#include <cryptopp/gcm.h>
+#include <cryptopp/filters.h>
+#include <cryptopp/osrng.h>
+#include <cryptopp/rsa.h>
+#include <cryptopp/base64.h>
+#include <cryptopp/modes.h>
+
+namespace asio = boost::asio;
+using tcp = asio::ip::tcp;
 
 std::atomic<bool> stop_threads(false);
 
-void receiveMessages(SOCKET serverSocket, const SimpleAES& aesCipher) {
-    while (!stop_threads) {
-        std::vector<unsigned char> encryptedData = recv_message_with_length(serverSocket);
+std::shared_ptr<SimpleAES> clientAesCipher_g;
+
+void receiveMessages(std::shared_ptr<tcp::socket> socket_ptr) {
+    while (!stop_threads && socket_ptr->is_open()) {
+        std::vector<unsigned char> encryptedData = recv_message_with_length(*socket_ptr);
 
         if (encryptedData.empty()) {
             if (!stop_threads) {
-                std::lock_guard<std::mutex> lock(console_mutex);
-                if (WSAGetLastError() == 0) {
-                    std::cerr << "\nServer disconnected gracefully.\n" << std::flush;
+                boost::system::error_code ec;
+                socket_ptr->remote_endpoint(ec);
+                if (ec == boost::asio::error::eof || ec == boost::asio::error::bad_descriptor) {
+                    std::lock_guard<std::mutex> lock(console_mutex);
+                    std::cerr << "\nClient: Server disconnected gracefully.\n" << std::flush;
                 }
-                else {
-                    std::cerr << "\nClient: Receive error (in receiveMessages thread): " << WSAGetLastError() << "\n" << std::flush;
+                else if (ec) {
+                    std::lock_guard<std::mutex> lock(console_mutex);
+                    std::cerr << "\nClient: Receive error (in receiveMessages thread): " << ec.message() << "\n" << std::flush;
                 }
             }
             break;
         }
 
+        if (!clientAesCipher_g) {
+            std::lock_guard<std::mutex> lock(console_mutex);
+            std::cerr << "\nClient: Error: AES cipher not initialized for decryption (in receiveMessages thread).\n" << std::flush;
+            break;
+        }
+
         try {
-            std::vector<unsigned char> decryptedData = aesCipher.decrypt(encryptedData);
+            std::vector<unsigned char> decryptedData = clientAesCipher_g->decrypt(encryptedData);
             std::string receivedMessage(reinterpret_cast<const char*>(decryptedData.data()), decryptedData.size());
 
             {
@@ -34,7 +60,6 @@ void receiveMessages(SOCKET serverSocket, const SimpleAES& aesCipher) {
                 incoming_messages_queue.push(receivedMessage);
             }
             incoming_messages_cv.notify_one();
-
         }
         catch (const CryptoPP::Exception& e) {
             std::lock_guard<std::mutex> lock(console_mutex);
@@ -46,6 +71,11 @@ void receiveMessages(SOCKET serverSocket, const SimpleAES& aesCipher) {
             std::cerr << "\nClient: Standard Exception during message decryption (in receiveMessages thread): " << e.what() << "\n" << std::flush;
             break;
         }
+    }
+    if (socket_ptr->is_open()) {
+        boost::system::error_code ec;
+        socket_ptr->shutdown(tcp::socket::shutdown_both, ec);
+        socket_ptr->close(ec);
     }
 }
 
@@ -74,270 +104,201 @@ void printQueuedMessages() {
     }
 }
 
+int runClient(const std::string& ipAddress, int port, const std::string& username) {
+    asio::io_context io_context;
+    std::shared_ptr<tcp::socket> socket_ptr = std::make_shared<tcp::socket>(io_context);
+    int app_result = 0;
 
-int runClient(const std::string& ipAddress, const std::string& port, const std::string& username) {
-    WSADATA wsaData;
-    SOCKET clientSocket = INVALID_SOCKET;
-    struct addrinfo* result = nullptr, * ptr = nullptr, hints;
-    int iResult;
-
-    iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (iResult != 0) {
-        std::cerr << "Client: WSAStartup failed: " << iResult << "\n" << std::flush;
-        return 1;
-    }
-
-    ZeroMemory(&hints, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-
-    iResult = getaddrinfo(ipAddress.c_str(), port.c_str(), &hints, &result);
-    if (iResult != 0) {
-        std::cerr << "Client: getaddrinfo failed: " << iResult << "\n" << std::flush;
-        WSACleanup();
-        return 1;
-    }
-
-    for (ptr = result; ptr != nullptr; ptr = ptr->ai_next) {
-        clientSocket = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
-        if (clientSocket == INVALID_SOCKET) {
-            std::cerr << "Client: socket failed with error: " << WSAGetLastError() << "\n" << std::flush;
-            continue;
-        }
-
-        iResult = connect(clientSocket, ptr->ai_addr, (int)ptr->ai_addrlen);
-        if (iResult == SOCKET_ERROR) {
-            closesocket(clientSocket);
-            clientSocket = INVALID_SOCKET;
-            continue;
-        }
-        break;
-    }
-
-    freeaddrinfo(result);
-
-    if (clientSocket == INVALID_SOCKET) {
-        std::cerr << "Client: Unable to connect to server!\n" << std::flush;
-        WSACleanup();
-        return 1;
-    }
-
-    std::cout << "Connected to server.\n" << std::flush;
-
-    char pubkeyBuf[4096];
-    int bytesReceived = recv(clientSocket, pubkeyBuf, sizeof(pubkeyBuf), 0);
-    if (bytesReceived <= 0) {
-        std::cerr << "Client: Failed to receive server public key. ";
-        if (bytesReceived == 0) {
-            std::cerr << "Server disconnected.\n";
-        }
-        else {
-            std::cerr << "Error: " << WSAGetLastError() << "\n";
-        }
-        closesocket(clientSocket);
-        WSACleanup();
-        return 1;
-    }
-    std::string encodedPubKey(pubkeyBuf, bytesReceived);
-
-    CryptoPP::RSA::PublicKey serverPublicKey;
-    CryptoPP::ByteQueue queue;
+    std::thread receiverThread;
+    std::thread printerThread;
 
     try {
-        CryptoPP::StringSource ss(encodedPubKey, true,
-            new CryptoPP::Base64Decoder(
-                new CryptoPP::Redirector(queue)));
+        tcp::resolver resolver(io_context);
+        asio::connect(*socket_ptr, resolver.resolve(ipAddress, std::to_string(port)));
 
-        if (queue.IsEmpty()) {
-            std::cerr << "Client: Error: Decoded public key queue is empty. Server likely sent invalid or empty Base64 data.\n";
-            closesocket(clientSocket);
-            WSACleanup();
-            return 1;
+        print_to_console(std::string("Connected to server: ") + socket_ptr->remote_endpoint().address().to_string() + ":" + std::to_string(socket_ptr->remote_endpoint().port()));
+
+        asio::streambuf server_pubkey_buffer;
+        boost::system::error_code error;
+        asio::read_until(*socket_ptr, server_pubkey_buffer, '\n', error);
+
+        if (error && error != asio::error::eof) {
+            throw boost::system::system_error(error, "Error receiving server public key.");
+        }
+        std::string encodedPubKey((std::istreambuf_iterator<char>(&server_pubkey_buffer)), std::istreambuf_iterator<char>());
+        if (!encodedPubKey.empty() && encodedPubKey.back() == '\n') {
+            encodedPubKey.pop_back();
         }
 
-        serverPublicKey.Load(queue);
+        CryptoPP::RSA::PublicKey serverPublicKey;
+        CryptoPP::ByteQueue queue;
 
-        CryptoPP::AutoSeededRandomPool rng_validation;
-        if (!serverPublicKey.Validate(rng_validation, 3)) {
-            std::cerr << "Client: Warning: Loaded server public key failed internal validation. It might be corrupt or malformed.\n";
-        }
-    }
-    catch (const CryptoPP::Exception& e) {
-        std::cerr << "Client: Crypto++ Exception while decoding/loading server public key: " << e.what() << "\n";
-        closesocket(clientSocket);
-        WSACleanup();
-        return 1;
-    }
-    catch (const std::exception& e) {
-        std::cerr << "Client: Standard Exception while decoding/loading server public key: " << e.what() << "\n";
-        closesocket(clientSocket);
-        WSACleanup();
-        return 1;
-    }
-    catch (...) {
-        std::cerr << "Client: Unknown Exception while decoding/loading server public key.\n";
-        closesocket(clientSocket);
-        WSACleanup();
-        return 1;
-    }
-
-    CryptoPP::AutoSeededRandomPool rng;
-    std::vector<unsigned char> aesKey(32);
-    rng.GenerateBlock(aesKey.data(), aesKey.size());
-
-    std::vector<unsigned char> encryptedAESKey;
-    try {
-        CryptoPP::RSAES_OAEP_SHA_Encryptor encryptor(serverPublicKey);
-
-        if (aesKey.size() > encryptor.FixedMaxPlaintextLength()) {
-            std::cerr << "Client: Error: AES key size (" << aesKey.size() << " bytes) is too large for RSA encryption with this public key and padding scheme. Max plaintext: " << encryptor.FixedMaxPlaintextLength() << " bytes.\n";
-            closesocket(clientSocket);
-            WSACleanup();
-            return 1;
-        }
-
-        std::string temp_encrypted_aes_key_str;
-        CryptoPP::StringSource ss2(aesKey.data(), aesKey.size(), true,
-            new CryptoPP::PK_EncryptorFilter(rng, encryptor,
-                new CryptoPP::StringSink(temp_encrypted_aes_key_str)));
-
-        encryptedAESKey.assign(temp_encrypted_aes_key_str.begin(), temp_encrypted_aes_key_str.end());
-
-    }
-    catch (const CryptoPP::Exception& e) {
-        std::cerr << "Client: Crypto++ Exception while encrypting AES key: " << e.what() << "\n";
-        closesocket(clientSocket);
-        WSACleanup();
-        return 1;
-    }
-    catch (const std::exception& e) {
-        std::cerr << "Client: Standard Exception while encrypting AES key: " << e.what() << "\n";
-        closesocket(clientSocket);
-        WSACleanup();
-        return 1;
-    }
-    catch (...) {
-        std::cerr << "Client: Unknown Exception while encrypting AES key.\n";
-        closesocket(clientSocket);
-        WSACleanup();
-        return 1;
-    }
-
-    if (!send_message_with_length(clientSocket, encryptedAESKey)) {
-        std::cerr << "Client: Failed to send encrypted AES key with length prefix. Error: " << WSAGetLastError() << "\n" << std::flush;
-        closesocket(clientSocket);
-        WSACleanup();
-        return 1;
-    }
-
-    SimpleAES aesCipher(aesKey);
-
-    std::vector<unsigned char> encryptedUsername;
-    try {
-        encryptedUsername = aesCipher.encrypt(std::vector<unsigned char>(username.begin(), username.end()));
-    }
-    catch (const CryptoPP::Exception& e) {
-        std::cerr << "Client: Crypto++ Exception while encrypting username: " << e.what() << "\n";
-        closesocket(clientSocket); WSACleanup(); return 1;
-    }
-
-    if (!send_message_with_length(clientSocket, encryptedUsername)) {
-        std::cerr << "Client: send username error (with length prefix): " << WSAGetLastError() << "\n" << std::flush;
-        closesocket(clientSocket);
-        WSACleanup();
-        return 1;
-    }
-
-    std::vector<unsigned char> encryptedWelcome = recv_message_with_length(clientSocket);
-
-    if (encryptedWelcome.empty()) {
-        if (WSAGetLastError() == 0) {
-            std::cerr << "Client: Server disconnected during welcome message reception.\n" << std::flush;
-        }
-        else {
-            std::cerr << "Client: recv welcome error (with length prefix): " << WSAGetLastError() << "\n" << std::flush;
-        }
-        closesocket(clientSocket);
-        WSACleanup();
-        return 1;
-    }
-    else {
         try {
-            std::vector<unsigned char> decryptedWelcome = aesCipher.decrypt(encryptedWelcome);
-            std::string welcomeMessage(reinterpret_cast<const char*>(decryptedWelcome.data()), decryptedWelcome.size());
-            std::cout << welcomeMessage << "\n" << std::flush;
+            CryptoPP::StringSource ss(encodedPubKey, true,
+                new CryptoPP::Base64Decoder(
+                    new CryptoPP::Redirector(queue)));
+
+            if (queue.IsEmpty()) {
+                throw std::runtime_error("Decoded public key queue is empty. Server likely sent invalid or empty Base64 data.");
+            }
+
+            serverPublicKey.Load(queue);
+
+            CryptoPP::AutoSeededRandomPool rng_validation;
+            if (!serverPublicKey.Validate(rng_validation, 3)) {
+                print_to_console("Client: Warning: Loaded server public key failed internal validation. It might be corrupt or malformed.");
+            }
         }
         catch (const CryptoPP::Exception& e) {
-            std::cerr << "Client: Crypto++ Exception while decrypting welcome message: " << e.what() << "\n";
-            closesocket(clientSocket);
-            WSACleanup();
-            return 1;
+            throw std::runtime_error(std::string("Crypto++ Exception while decoding/loading server public key: ") + e.what());
         }
-    }
-
-    std::thread receiverThread(receiveMessages, clientSocket, std::cref(aesCipher));
-    std::thread printerThread(printQueuedMessages);
-
-    std::string command;
-    while (true) {
-        {
-            std::lock_guard<std::mutex> lock(console_mutex);
-            std::cout << "Enter command: " << std::flush;
+        catch (const std::exception& e) {
+            throw std::runtime_error(std::string("Standard Exception while decoding/loading server public key: ") + e.what());
+        }
+        catch (...) {
+            throw std::runtime_error("Unknown Exception while decoding/loading server public key.");
         }
 
-        std::getline(std::cin, command);
+        CryptoPP::AutoSeededRandomPool rng;
+        std::vector<unsigned char> aesKey(32);
+        rng.GenerateBlock(aesKey.data(), aesKey.size());
 
-        if (std::cin.fail()) {
-            std::lock_guard<std::mutex> lock(console_mutex);
-            std::cerr << "Client: Input stream error detected. Clearing state.\n" << std::flush;
-            std::cin.clear();
-            std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-            continue;
-        }
-
-        if (command == "exit") {
-            std::lock_guard<std::mutex> lock(console_mutex);
-            std::cout << "Exiting client.\n" << std::flush;
-            break;
-        }
-
-        std::vector<unsigned char> encryptedCommand;
+        std::vector<unsigned char> encryptedAESKey;
         try {
-            encryptedCommand = aesCipher.encrypt(std::vector<unsigned char>(command.begin(), command.end()));
+            CryptoPP::RSAES_OAEP_SHA_Encryptor encryptor(serverPublicKey);
+
+            if (aesKey.size() > encryptor.FixedMaxPlaintextLength()) {
+                throw std::runtime_error(std::string("AES key size (") + std::to_string(aesKey.size()) + " bytes) is too large for RSA encryption with this public key and padding scheme. Max plaintext: " + std::to_string(encryptor.FixedMaxPlaintextLength()) + " bytes.");
+            }
+
+            std::string temp_encrypted_aes_key_str;
+            CryptoPP::StringSource ss2(aesKey.data(), aesKey.size(), true,
+                new CryptoPP::PK_EncryptorFilter(rng, encryptor,
+                    new CryptoPP::StringSink(temp_encrypted_aes_key_str)));
+
+            encryptedAESKey.assign(temp_encrypted_aes_key_str.begin(), temp_encrypted_aes_key_str.end());
         }
         catch (const CryptoPP::Exception& e) {
-            std::lock_guard<std::mutex> lock(console_mutex);
-            std::cerr << "Client: Crypto++ Exception while encrypting command: " << e.what() << "\n";
-            break;
+            throw std::runtime_error(std::string("Crypto++ Exception while encrypting AES key: ") + e.what());
+        }
+        catch (const std::exception& e) {
+            throw std::runtime_error(std::string("Standard Exception while encrypting AES key: ") + e.what());
+        }
+        catch (...) {
+            throw std::runtime_error("Unknown Exception while encrypting AES key.");
         }
 
-        if (!send_message_with_length(clientSocket, encryptedCommand)) {
-            std::lock_guard<std::mutex> lock(console_mutex);
-            std::cerr << "Client: send error (with length prefix): " << WSAGetLastError() << "\n" << std::flush;
-            break;
+        if (!send_message_with_length(*socket_ptr, encryptedAESKey)) {
+            throw std::runtime_error("Failed to send encrypted AES key with length prefix.");
         }
+
+        clientAesCipher_g = std::make_shared<SimpleAES>(aesKey);
+
+        std::vector<unsigned char> encryptedUsername;
+        try {
+            encryptedUsername = clientAesCipher_g->encrypt(std::vector<unsigned char>(username.begin(), username.end()));
+        }
+        catch (const CryptoPP::Exception& e) {
+            throw std::runtime_error(std::string("Crypto++ Exception while encrypting username: ") + e.what());
+        }
+
+        if (!send_message_with_length(*socket_ptr, encryptedUsername)) {
+            throw std::runtime_error("Failed to send encrypted username with length prefix.");
+        }
+
+        std::vector<unsigned char> encryptedWelcome = recv_message_with_length(*socket_ptr);
+
+        if (encryptedWelcome.empty()) {
+            throw std::runtime_error("Failed to receive welcome message (ACK) from server or server disconnected.");
+        }
+        else {
+            try {
+                std::vector<unsigned char> decryptedWelcome = clientAesCipher_g->decrypt(encryptedWelcome);
+                std::string welcomeMessage(reinterpret_cast<const char*>(decryptedWelcome.data()), decryptedWelcome.size());
+                print_to_console(welcomeMessage);
+            }
+            catch (const CryptoPP::Exception& e) {
+                throw std::runtime_error(std::string("Crypto++ Exception while decrypting welcome message: ") + e.what());
+            }
+        }
+
+        receiverThread = std::thread(receiveMessages, socket_ptr);
+        printerThread = std::thread(printQueuedMessages);
+
+        std::string command;
+        while (socket_ptr->is_open()) {
+            {
+                std::lock_guard<std::mutex> lock(console_mutex);
+                std::cout << "Enter command: " << std::flush;
+            }
+
+            std::getline(std::cin, command);
+
+            if (std::cin.fail()) {
+                std::lock_guard<std::mutex> lock(console_mutex);
+                std::cerr << "Client: Input stream error detected. Clearing state.\n" << std::flush;
+                std::cin.clear();
+                std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+                continue;
+            }
+
+            if (command == "exit") {
+                std::lock_guard<std::mutex> lock(console_mutex);
+                std::cout << "Exiting client.\n" << std::flush;
+                break;
+            }
+
+            std::vector<unsigned char> encryptedCommand;
+            try {
+                if (!clientAesCipher_g) {
+                    std::lock_guard<std::mutex> lock(console_mutex);
+                    std::cerr << "Client: Error: AES cipher not initialized. Cannot send command.\n";
+                    break;
+                }
+                encryptedCommand = clientAesCipher_g->encrypt(std::vector<unsigned char>(command.begin(), command.end()));
+            }
+            catch (const CryptoPP::Exception& e) {
+                std::lock_guard<std::mutex> lock(console_mutex);
+                std::cerr << "Client: Crypto++ Exception while encrypting command: " << e.what() << "\n";
+                break;
+            }
+
+            if (!send_message_with_length(*socket_ptr, encryptedCommand)) {
+                std::lock_guard<std::mutex> lock(console_mutex);
+                std::cerr << "Client: send error (with length prefix).\n" << std::flush;
+                break;
+            }
+        }
+
+    }
+    catch (const boost::system::system_error& e) {
+        print_to_console(std::string("Client: Network Error: ") + e.what());
+        app_result = 1;
+    }
+    catch (const std::exception& e) {
+        print_to_console(std::string("Client: Application Error: ") + e.what());
+        app_result = 1;
     }
 
     stop_threads = true;
     incoming_messages_cv.notify_all();
 
-    shutdown(clientSocket, SD_RECEIVE);
-
-    if (receiverThread.joinable()) {
-        receiverThread.join();
+    boost::system::error_code ec_shutdown;
+    if (socket_ptr->is_open()) {
+        socket_ptr->shutdown(tcp::socket::shutdown_send, ec_shutdown);
     }
+
     if (printerThread.joinable()) {
         printerThread.join();
     }
-
-    int iResultShutdown = shutdown(clientSocket, SD_SEND);
-    if (iResultShutdown == SOCKET_ERROR) {
-        std::lock_guard<std::mutex> lock(console_mutex);
-        std::cerr << "Client: shutdown send error: " << WSAGetLastError() << "\n" << std::flush;
+    if (receiverThread.joinable()) {
+        receiverThread.join();
     }
 
-    closesocket(clientSocket);
-    WSACleanup();
-    return 0;
+    boost::system::error_code ec_close;
+    if (socket_ptr->is_open()) {
+        socket_ptr->close(ec_close);
+    }
+
+    return app_result;
 }

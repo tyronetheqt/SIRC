@@ -1,5 +1,6 @@
-#pragma once
+#ifndef SERVER_H
+#define SERVER_H
 
-int runServer(const std::string& port);
+int runServer(int port);
 
-void handleClient(SOCKET clientSocket);
+#endif
