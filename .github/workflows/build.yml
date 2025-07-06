@@ -18,28 +18,17 @@ jobs:
         build_type: [Release]
         
         include:
+          # Windows (MSVC) x64 build
           - os: windows-latest
             c_compiler: cl
             cpp_compiler: cl
             vcpkg_triplet: x64-windows
 
+          # Linux (GCC/G++) x64 build
           - os: ubuntu-latest
             c_compiler: gcc
             cpp_compiler: g++
             vcpkg_triplet: x64-linux
-
-          - os: ubuntu-latest
-            c_compiler: clang
-            cpp_compiler: clang++
-            vcpkg_triplet: x64-linux
-
-        exclude:
-          - os: windows-latest
-            c_compiler: gcc
-          - os: windows-latest
-            c_compiler: clang
-          - os: ubuntu-latest
-            c_compiler: cl
 
     steps:
     - uses: actions/checkout@v4
@@ -53,9 +42,6 @@ jobs:
         echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
         
         if [[ "${{ runner.os }}" == "Windows" ]]; then
-          # Convert Windows paths to use forward slashes for YAML safety
-          # PowerShell and CMake on Windows can handle forward slashes.
-          # Use raw string for sed to avoid shell interpretation of backslashes
           VCPKG_ROOT_WIN=$(echo "$env:TEMP/vcpkg" | sed 's/\\/\//g')
           VCPKG_TOOLCHAIN_FILE_WIN=$(echo "$env:TEMP/vcpkg/scripts/buildsystems/vcpkg.cmake" | sed 's/\\/\//g')
           echo "vcpkg-root=$VCPKG_ROOT_WIN" >> "$GITHUB_OUTPUT"
@@ -82,7 +68,6 @@ jobs:
     - name: Cache vcpkg installed packages
       uses: actions/cache@v4
       with:
-        # Use forward slashes here as well, as the output from 'strings' step is now normalized
         path: ${{ runner.os == 'Windows' && format('{0}/installed', steps.strings.outputs.vcpkg-root) || format('{0}/installed', steps.strings.outputs.vcpkg-root) }}
         key: ${{ runner.os }}-vcpkg-${{ hashFiles('vcpkg.json') || hashFiles('CMakeLists.txt') }}
         restore-keys: |
