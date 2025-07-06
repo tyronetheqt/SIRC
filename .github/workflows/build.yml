@@ -130,7 +130,7 @@ jobs:
       with:
         name: compiled-binaries-linux-${{ matrix.build_type }}
         path: |
-          ${{ steps.strings_paths.outputs.build-output-dir }}/${{ matrix.build_type }}/SIRC
+          ${{ steps.strings_paths.outputs.build-output-dir }}/SIRC
 
     - name: Test (Windows)
       if: runner.os == 'Windows'
