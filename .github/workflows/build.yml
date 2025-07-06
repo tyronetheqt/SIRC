@@ -40,9 +40,9 @@ jobs:
       id: strings_windows
       shell: pwsh
       run: |
-        Write-Output "build-output-dir=${{ github.workspace }}\build"
-        Write-Output "vcpkg-root=$env:TEMP\vcpkg"
-        Write-Output "vcpkg-toolchain-file=$env:TEMP\vcpkg\scripts\buildsystems\vcpkg.cmake"
+        echo "build-output-dir=${{ github.workspace }}\build" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        echo "vcpkg-root=$env:TEMP\vcpkg" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        echo "vcpkg-toolchain-file=$env:TEMP\vcpkg\scripts\buildsystems\vcpkg.cmake" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
     - name: Set reusable strings and vcpkg paths (Linux/macOS)
       if: runner.os != 'Windows'
@@ -70,8 +70,6 @@ jobs:
     - name: Cache vcpkg installed packages
       uses: actions/cache@v4
       with:
-        # Use a conditional path to match the OS-specific vcpkg installation location
-        # Paths for cache should generally use forward slashes for consistency
         path: ${{ runner.os == 'Windows' && format('{0}/installed', steps.strings_windows.outputs.vcpkg-root) || format('{0}/installed', steps.strings_linux.outputs.vcpkg-root) }}
         key: ${{ runner.os }}-vcpkg-${{ hashFiles('vcpkg.json') || hashFiles('CMakeLists.txt') }}
         restore-keys: |
@@ -81,14 +79,12 @@ jobs:
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        # In manifest mode, just run 'vcpkg install' without package arguments
         & "${{ steps.strings_windows.outputs.vcpkg-root }}\vcpkg.exe" install
 
     - name: Install dependencies via vcpkg (Linux/macOS)
       if: runner.os != 'Windows'
       shell: bash
       run: |
-        # In manifest mode, just run 'vcpkg install' without package arguments
         "${{ steps.strings_linux.outputs.vcpkg-root }}/vcpkg" install
 
     - name: Configure CMake (Windows)
