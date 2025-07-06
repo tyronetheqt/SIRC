@@ -96,14 +96,12 @@ jobs:
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        $CMAKE_COMMON_ARGS="-DCMAKE_CXX_STANDARD=17 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}"
-        $CMAKE_COMPILER_ARGS="-DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }} -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}"
-        $CMAKE_TOOLCHAIN_FILE_ARG="-DCMAKE_TOOLCHAIN_FILE=${{ steps.strings.outputs.vcpkg-toolchain-file }}"
-        
         cmake -B "${{ steps.strings.outputs.build-output-dir }}" `
-              $CMAKE_TOOLCHAIN_FILE_ARG `
-              $CMAKE_COMPILER_ARGS `
-              $CMAKE_COMMON_ARGS `
+              -DCMAKE_TOOLCHAIN_FILE="${{ steps.strings.outputs.vcpkg-toolchain-file }}" `
+              -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }} `
+              -DCMAKE_C_COMPILER=${{ matrix.c_compiler }} `
+              -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
+              -DCMAKE_CXX_STANDARD=17 `
               -A x64 `
               -S "${{ github.workspace }}"
 
@@ -111,14 +109,12 @@ jobs:
       if: runner.os != 'Windows'
       shell: bash
       run: |
-        CMAKE_COMMON_ARGS="-DCMAKE_CXX_STANDARD=17 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}"
-        CMAKE_COMPILER_ARGS="-DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }} -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}"
-        CMAKE_TOOLCHAIN_FILE_ARG="-DCMAKE_TOOLCHAIN_FILE=${{ steps.strings.outputs.vcpkg-toolchain-file }}"
-        
         cmake -B ${{ steps.strings.outputs.build-output-dir }} \
-              $CMAKE_TOOLCHAIN_FILE_ARG \
-              $CMAKE_COMPILER_ARGS \
-              $CMAKE_COMMON_ARGS \
+              -DCMAKE_TOOLCHAIN_FILE=${{ steps.strings.outputs.vcpkg-toolchain-file }} \
+              -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }} \
+              -DCMAKE_C_COMPILER=${{ matrix.c_compiler }} \
+              -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+              -DCMAKE_CXX_STANDARD=17 \
               -S ${{ github.workspace }}
 
     - name: Build (Windows)
