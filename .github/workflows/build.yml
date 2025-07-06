@@ -48,13 +48,17 @@ jobs:
 
     - name: Set reusable strings and vcpkg paths
       id: strings
-      shell: bash
+      shell: bash # Use bash for consistent output setting across OS
       run: |
         echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
         
         if [[ "${{ runner.os }}" == "Windows" ]]; then
-          echo "vcpkg-root=$env:TEMP\vcpkg" >> "$GITHUB_OUTPUT"
-          echo "vcpkg-toolchain-file=$env:TEMP\vcpkg\scripts\buildsystems\vcpkg.cmake" >> "$GITHUB_OUTPUT"
+          # Convert Windows paths to use forward slashes for YAML safety
+          # PowerShell and CMake on Windows can handle forward slashes.
+          VCPKG_ROOT_WIN=$(echo "$env:TEMP/vcpkg" | sed 's/\\/\//g')
+          VCPKG_TOOLCHAIN_FILE_WIN=$(echo "$env:TEMP/vcpkg/scripts/buildsystems/vcpkg.cmake" | sed 's/\\/\//g')
+          echo "vcpkg-root=$VCPKG_ROOT_WIN" >> "$GITHUB_OUTPUT"
+          echo "vcpkg-toolchain-file=$VCPKG_TOOLCHAIN_FILE_WIN" >> "$GITHUB_OUTPUT"
         else
           echo "vcpkg-root=${{ runner.temp }}/vcpkg" >> "$GITHUB_OUTPUT"
           echo "vcpkg-toolchain-file=${{ runner.temp }}/vcpkg/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_OUTPUT"
@@ -65,7 +69,7 @@ jobs:
       shell: pwsh
       run: |
         git clone https://github.com/microsoft/vcpkg.git "${{ steps.strings.outputs.vcpkg-root }}"
-        "${{ steps.strings.outputs.vcpkg-root }}\bootstrap-vcpkg.bat" -disableMetrics
+        "${{ steps.strings.outputs.vcpkg-root }}/bootstrap-vcpkg.bat" -disableMetrics
 
     - name: Install vcpkg (Linux/macOS)
       if: runner.os != 'Windows'
@@ -77,7 +81,7 @@ jobs:
     - name: Cache vcpkg installed packages
       uses: actions/cache@v4
       with:
-        path: ${{ runner.os == 'Windows' && format('{0}\\installed', steps.strings.outputs.vcpkg-root) || format('{0}/installed', steps.strings.outputs.vcpkg-root) }}
+        path: ${{ runner.os == 'Windows' && format('{0}/installed', steps.strings.outputs.vcpkg-root) || format('{0}/installed', steps.strings.outputs.vcpkg-root) }}
         key: ${{ runner.os }}-vcpkg-${{ hashFiles('vcpkg.json') || hashFiles('CMakeLists.txt') }}
         restore-keys: |
           ${{ runner.os }}-vcpkg-
@@ -85,7 +89,7 @@ jobs:
     - name: Install dependencies via vcpkg (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
-      run: "${{ steps.strings.outputs.vcpkg-root }}\vcpkg.exe" install cryptopp:${{ matrix.vcpkg_triplet }} boost-asio:${{ matrix.vcpkg_triplet }}
+      run: "${{ steps.strings.outputs.vcpkg-root }}/vcpkg.exe" install cryptopp:${{ matrix.vcpkg_triplet }} boost-asio:${{ matrix.vcpkg_triplet }}
 
     - name: Install dependencies via vcpkg (Linux/macOS)
       if: runner.os != 'Windows'
