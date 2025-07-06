@@ -65,7 +65,7 @@ jobs:
       shell: pwsh
       run: |
         git clone https://github.com/microsoft/vcpkg.git "${{ steps.strings.outputs.vcpkg-root }}"
-        & "${{ steps.strings.outputs.vcpkg-root }}\bootstrap-vcpkg.bat" -disableMetrics
+        "${{ steps.strings.outputs.vcpkg-root }}\bootstrap-vcpkg.bat" -disableMetrics
 
     - name: Install vcpkg (Linux/macOS)
       if: runner.os != 'Windows'
@@ -85,7 +85,7 @@ jobs:
     - name: Install dependencies via vcpkg (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
-      run: & "${{ steps.strings.outputs.vcpkg-root }}\vcpkg.exe" install cryptopp:${{ matrix.vcpkg_triplet }} boost-asio:${{ matrix.vcpkg_triplet }}
+      run: "${{ steps.strings.outputs.vcpkg-root }}\vcpkg.exe" install cryptopp:${{ matrix.vcpkg_triplet }} boost-asio:${{ matrix.vcpkg_triplet }}
 
     - name: Install dependencies via vcpkg (Linux/macOS)
       if: runner.os != 'Windows'
