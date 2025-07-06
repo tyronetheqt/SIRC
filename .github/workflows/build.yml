@@ -58,7 +58,7 @@ jobs:
       shell: pwsh
       run: |
         git clone https://github.com/microsoft/vcpkg.git "${{ steps.strings_windows.outputs.vcpkg-root }}"
-        & "${{ steps.strings_windows.outputs.vcpkg-root }}\bootstrap-vcpkg.bat" -disableMetrics
+        & "${{ steps.strings.outputs.vcpkg-root }}\bootstrap-vcpkg.bat" -disableMetrics
 
     - name: Install vcpkg (Linux/macOS)
       if: runner.os != 'Windows'
@@ -117,10 +117,28 @@ jobs:
       shell: pwsh
       run: cmake --build ${{ steps.strings_windows.outputs.build-output-dir }} --config ${{ matrix.build_type }}
 
+    - name: Upload Windows Binaries
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: compiled-binaries-windows-${{ matrix.build_type }}
+        path: |
+          ${{ steps.strings_windows.outputs.build-output-dir }}\${{ matrix.build_type }}\SIRC_Server.exe
+          ${{ steps.strings_windows.outputs.build-output-dir }}\${{ matrix.build_type }}\SIRC_Client.exe
+
     - name: Build (Linux/macOS)
       if: runner.os != 'Windows'
       shell: bash
       run: cmake --build ${{ steps.strings_linux.outputs.build-output-dir }} --config ${{ matrix.build_type }}
+
+    - name: Upload Linux Binaries
+      if: runner.os != 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: compiled-binaries-linux-${{ matrix.build_type }}
+        path: |
+          ${{ steps.strings_linux.outputs.build-output-dir }}/SIRC_Server
+          ${{ steps.strings_linux.outputs.build-output-dir }}/SIRC_Client
 
     - name: Test (Windows)
       if: runner.os == 'Windows'
