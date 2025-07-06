@@ -115,12 +115,8 @@ Your executables will be located in the `build` directory (or a subdirectory lik
 
 ## Future Improvements
 
-* **Cross-Platform Support:** Refactor networking code to use a cross-platform library (e.g., Boost.Asio, plain POSIX sockets for Linux/macOS).
-* **Group Chat:** Implement a feature for public messages to all connected users.
 * **User Management:** Add features like user registration, login, and password hashing.
-* **Command Autocompletion/History:** Enhance the client-side user interface.
 * **File Transfer:** Securely transfer files between clients.
-* **Error Reporting:** More detailed and user-friendly error messages.
 
 ## License
 
