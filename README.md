@@ -63,9 +63,9 @@ This project requires the **Crypto++ library**. Ensure you have it installed and
 3.  **Start Clients:**
     Open one or more separate command prompts/terminals for clients.
     ```bash
-    ./binary.exe <server_ip_address> <port_number> <your_username>
+    ./binary.exe <server_ip_address> <your_username>
     ```
-    Example: `.\binary.exe 127.0.0.1 12345 Alice`
+    Example: `.\binary.exe 127.0.0.1 Alice`
     The client will attempt to connect, perform key exchange, and then prompt for commands.
 
 ## Future Improvements
