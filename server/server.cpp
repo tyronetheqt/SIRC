@@ -193,7 +193,6 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
         return;
     }
 
-    // Receive encrypted username
     std::vector<unsigned char> encryptedUsername = recv_message_with_length(*clientSocketPtr);
 
     if (encryptedUsername.empty()) {
@@ -566,9 +565,9 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
                                 if (channel) {
                                     std::string leaveBroadcastMessage = clientUsername + " has left #" + channelToLeave + ".";
                                     bool channelBecameEmpty = false;
+                                    bool wasMember = false;
                                     {
                                         std::lock_guard<std::mutex> channelLock(channel->mutex);
-                                        bool wasMember = false;
                                         for (auto it_member = channel->members.begin(); it_member != channel->members.end(); ++it_member) {
                                             if (it_member->first == clientSocketPtr) {
                                                 channel->members.erase(it_member);
@@ -584,8 +583,8 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
                                         }
                                     }
 
-                                    if (std::find(channelsLeftSuccessfully.begin(), channelsLeftSuccessfully.end(), channelToLeave) != channelsLeftSuccessfully.end()) {
-                                        broadcastToChannel(channelToLeave, leaveBroadcastMessage);
+                                    if (wasMember) {
+                                        broadcastToChannel(channelToLeave, leaveBroadcastMessage, clientSocketPtr);
                                     }
 
                                     if (channelBecameEmpty) {
@@ -597,6 +596,7 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
                             {
                                 std::lock_guard<std::mutex> lock(channels_mutex);
                                 for (const std::string& emptyChannel : channelsToCleanUp) {
+                                    std::cout << "Server: Attempting to erase #" << emptyChannel << "\n";
                                     channels.erase(emptyChannel);
                                     std::lock_guard<std::mutex> consoleLock(console_mutex);
                                     std::cout << "Server: Channel #" << emptyChannel << " is now empty and removed (client disconnect cleanup).\n";
@@ -755,31 +755,48 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
             << ":" << clientSocketPtr->remote_endpoint().port() << ") removed from online users list.\n";
     }
 
+    std::vector<std::string> channelsToRemove;
     {
         std::lock_guard<std::mutex> lock(channels_mutex);
+        std::cout << "Disconnect cleanup: joined channels: " << joinedChannels.size() << "\n";
         for (const std::string& channelName : joinedChannels) {
             auto it = channels.find(channelName);
-            if (it != channels.end()) {
-                std::shared_ptr<Channel> channel = it->second;
+            if (it == channels.end()) continue;
+
+            std::shared_ptr<Channel> channel = it->second;
+            if (!channel) {
+                std::cerr << "Channel #" << channelName << " is null. Skipping.\n";
+                continue;
+            }
+
+            {
                 std::lock_guard<std::mutex> channelLock(channel->mutex);
-                bool wasMember = false;
-                for (auto it_member = channel->members.begin(); it_member != channel->members.end(); ++it_member) {
-                    if (it_member->first == clientSocketPtr) {
-                        channel->members.erase(it_member);
-                        wasMember = true;
-                        break;
+                auto it_member = channel->members.find(clientSocketPtr);
+                if (it_member != channel->members.end()) {
+                    channel->members.erase(it_member);
+                    std::cout << "Erased client from #" << channelName << "\n";
+
+                    std::string leaveBroadcastMessage = clientUsername + " has left #" + channelName + ".";
+
+                    /*try {
+                        broadcastToChannel(channelName, leaveBroadcastMessage);
+                    }
+                    catch (const std::exception& e) {
+                        std::cerr << "Broadcast failed in #" << channelName << ": " << e.what() << "\n";
+                    }*/
+
+                    if (channel->members.empty()) {
+                        std::cout << "Server: #" << channelName << " attempting to erase.\n";
+                        channelsToRemove.push_back(channelName);
                     }
                 }
-                if (wasMember) {
-                    std::string leaveBroadcastMessage = clientUsername + " has left #" + channelName + ".";
-                    broadcastToChannel(channelName, leaveBroadcastMessage);
-                }
-                if (channel->members.empty()) {
-                    channels.erase(channelName);
-                    std::lock_guard<std::mutex> consoleLock(console_mutex);
-                    std::cout << "Server: Channel #" << channelName << " is now empty and removed (client disconnect cleanup).\n";
-                }
             }
+        }
+
+        for (const std::string& ch : channelsToRemove) {
+            channels.erase(ch);
+            std::lock_guard<std::mutex> consoleLock(console_mutex);
+            std::cout << "Server: Channel #" << ch << " is now empty and removed (client disconnect cleanup).\n";
         }
     }
     boost::system::error_code ec;
