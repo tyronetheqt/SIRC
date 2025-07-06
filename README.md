@@ -32,6 +32,7 @@ This project implements a basic client-server chat application with a focus on s
 ## Technologies Used
 
 * **Crypto++ Library:** For all cryptographic operations (RSA, AES-GCM, key generation, encoding/decoding).
+* * **Boost.Asio:** For all low level network connections.
 
 ## How to Build
 
