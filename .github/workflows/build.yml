@@ -37,25 +37,27 @@ jobs:
 
     - name: Set reusable strings and vcpkg paths
       id: strings
-      shell: bash
+      # Use pwsh for Windows, bash for others to correctly interpret environment variables
+      shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
       run: |
-        echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
-        
-        if [[ "${{ runner.os }}" == "Windows" ]]; then
-          # For Windows, use backslashes as native path separators for PowerShell
-          echo "vcpkg-root=$env:TEMP\vcpkg" >> "$GITHUB_OUTPUT"
-          echo "vcpkg-toolchain-file=$env:TEMP\vcpkg\scripts\buildsystems\vcpkg.cmake" >> "$GITHUB_OUTPUT"
-        else
+        if ("${{ runner.os }}" == "Windows") {
+          # PowerShell syntax for setting output variables
+          Write-Output "build-output-dir=${{ github.workspace }}\build"
+          Write-Output "vcpkg-root=$env:TEMP\vcpkg"
+          Write-Output "vcpkg-toolchain-file=$env:TEMP\vcpkg\scripts\buildsystems\vcpkg.cmake"
+        } else {
+          # Bash syntax for setting output variables
+          echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
           echo "vcpkg-root=${{ runner.temp }}/vcpkg" >> "$GITHUB_OUTPUT"
           echo "vcpkg-toolchain-file=${{ runner.temp }}/vcpkg/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_OUTPUT"
-        fi
+        }
 
     - name: Install vcpkg (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
         git clone https://github.com/microsoft/vcpkg.git "${{ steps.strings.outputs.vcpkg-root }}"
-        # Use '&' call operator for .bat files with arguments
+        # Use '&' call operator for .bat files when arguments are present
         & "${{ steps.strings.outputs.vcpkg-root }}\bootstrap-vcpkg.bat" -disableMetrics
 
     - name: Install vcpkg (Linux/macOS)
