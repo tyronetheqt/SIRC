@@ -60,16 +60,19 @@ jobs:
           echo "vcpkg-toolchain-file=${{ runner.temp }}/vcpkg/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_OUTPUT"
         fi
 
-    - name: Install vcpkg
-      shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
+    - name: Install vcpkg (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
       run: |
         git clone https://github.com/microsoft/vcpkg.git "${{ steps.strings.outputs.vcpkg-root }}"
-        
-        if ("${{ runner.os }}" == "Windows") {
-          & "${{ steps.strings.outputs.vcpkg-root }}\bootstrap-vcpkg.bat" -disableMetrics
-        } else {
-          "${{ steps.strings.outputs.vcpkg-root }}/bootstrap-vcpkg.sh" -disableMetrics
-        }
+        & "${{ steps.strings.outputs.vcpkg-root }}\bootstrap-vcpkg.bat" -disableMetrics
+
+    - name: Install vcpkg (Linux/macOS)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        git clone https://github.com/microsoft/vcpkg.git "${{ steps.strings.outputs.vcpkg-root }}"
+        "${{ steps.strings.outputs.vcpkg-root }}/bootstrap-vcpkg.sh" -disableMetrics
 
     - name: Cache vcpkg installed packages
       uses: actions/cache@v4
@@ -79,42 +82,63 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-vcpkg-
 
-    - name: Install dependencies via vcpkg
-      shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
-      run: |
-        if ("${{ runner.os }}" == "Windows") {
-          & "${{ steps.strings.outputs.vcpkg-root }}\vcpkg.exe" install cryptopp:${{ matrix.vcpkg_triplet }} boost-asio:${{ matrix.vcpkg_triplet }}
-        } else {
-          "${{ steps.strings.outputs.vcpkg-root }}/vcpkg" install cryptopp:${{ matrix.vcpkg_triplet }} boost-asio:${{ matrix.vcpkg_triplet }}
-        }
+    - name: Install dependencies via vcpkg (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: & "${{ steps.strings.outputs.vcpkg-root }}\vcpkg.exe" install cryptopp:${{ matrix.vcpkg_triplet }} boost-asio:${{ matrix.vcpkg_triplet }}
 
-    - name: Configure CMake
-      shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
+    - name: Install dependencies via vcpkg (Linux/macOS)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: "${{ steps.strings.outputs.vcpkg-root }}/vcpkg" install cryptopp:${{ matrix.vcpkg_triplet }} boost-asio:${{ matrix.vcpkg_triplet }}
+
+    - name: Configure CMake (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $CMAKE_COMMON_ARGS="-DCMAKE_CXX_STANDARD=17 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}"
+        $CMAKE_COMPILER_ARGS="-DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }} -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}"
+        $CMAKE_TOOLCHAIN_FILE_ARG="-DCMAKE_TOOLCHAIN_FILE=${{ steps.strings.outputs.vcpkg-toolchain-file }}"
+        
+        cmake -B "${{ steps.strings.outputs.build-output-dir }}" `
+              $CMAKE_TOOLCHAIN_FILE_ARG `
+              $CMAKE_COMPILER_ARGS `
+              $CMAKE_COMMON_ARGS `
+              -A x64 `
+              -S "${{ github.workspace }}"
+
+    - name: Configure CMake (Linux/macOS)
+      if: runner.os != 'Windows'
+      shell: bash
       run: |
         CMAKE_COMMON_ARGS="-DCMAKE_CXX_STANDARD=17 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}"
         CMAKE_COMPILER_ARGS="-DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }} -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}"
         CMAKE_TOOLCHAIN_FILE_ARG="-DCMAKE_TOOLCHAIN_FILE=${{ steps.strings.outputs.vcpkg-toolchain-file }}"
         
-        if ("${{ runner.os }}" == "Windows") {
-          cmake -B "${{ steps.strings.outputs.build-output-dir }}" `
-                $CMAKE_TOOLCHAIN_FILE_ARG `
-                $CMAKE_COMPILER_ARGS `
-                $CMAKE_COMMON_ARGS `
-                -A x64 `
-                -S "${{ github.workspace }}"
-        } else {
-          cmake -B ${{ steps.strings.outputs.build-output-dir }} \
-                $CMAKE_TOOLCHAIN_FILE_ARG \
-                $CMAKE_COMPILER_ARGS \
-                $CMAKE_COMMON_ARGS \
-                -S ${{ github.workspace }}
-        }
+        cmake -B ${{ steps.strings.outputs.build-output-dir }} \
+              $CMAKE_TOOLCHAIN_FILE_ARG \
+              $CMAKE_COMPILER_ARGS \
+              $CMAKE_COMMON_ARGS \
+              -S ${{ github.workspace }}
 
-    - name: Build
-      shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
+    - name: Build (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
       run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }}
 
-    - name: Test
+    - name: Build (Linux/macOS)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }}
+
+    - name: Test (Windows)
+      if: runner.os == 'Windows'
       working-directory: ${{ steps.strings.outputs.build-output-dir }}
-      shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
+      shell: pwsh
+      run: ctest --build-config ${{ matrix.build_type }}
+
+    - name: Test (Linux/macOS)
+      if: runner.os != 'Windows'
+      working-directory: ${{ steps.strings.outputs.build-output-dir }}
+      shell: bash
       run: ctest --build-config ${{ matrix.build_type }}
