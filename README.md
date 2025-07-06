@@ -35,21 +35,65 @@ This project implements a basic client-server chat application with a focus on s
 
 ## How to Build
 
-This project requires the **Crypto++ library**. Ensure you have it installed and configured for your compiler. The networking code is specifically written for **Windows** using Winsock.
+This project uses **CMake** as its build system and **vcpkg** for managing C++ dependencies (Crypto++ and Boost.Asio).
 
-1.  **Install Crypto++:** Download and build Crypto++ according to its official documentation. You'll need its `.lib` files (or static `.a` files) and header files.
-2.  **Compiler:** A C++17 compliant compiler (e.g., MSVC, MinGW with g++).
-3.  **Project Setup:**
-    * Create a new C++ project in your IDE (e.g., Visual Studio).
-    * Add `server.cpp`, `client.cpp`, and `common.h` to your project.
-    * Configure your project settings to link against the Crypto++ library and Winsock (`ws2_32.lib` for MSVC).
-    * Ensure the Crypto++ header directories are included in your compiler's include paths.
+### Prerequisites
 
-**Example (Visual Studio Linker Settings):**
+1.  **C++17 Compliant Compiler:**
+    * **Windows:** MSVC (Visual Studio 2017 or newer), MinGW (g++ 7 or newer).
+    * **Linux/macOS:** GCC (g++ 7 or newer), Clang (Clang 5 or newer).
+2.  **CMake:** Version 3.15 or newer.
+    * Download from [cmake.org](https://cmake.org/download/).
+3.  **Vcpkg:** A C++ package manager.
+    * **Clone vcpkg:**
+        ```bash
+        git clone [https://github.com/microsoft/vcpkg.git](https://github.com/microsoft/vcpkg.git)
+        ```
+    * **Bootstrap vcpkg:**
+        ```bash
+        cd vcpkg
+        ./bootstrap-vcpkg.sh   # On Linux/macOS
+        .\bootstrap-vcpkg.bat # On Windows
+        ```
+    * **Integrate vcpkg (optional but recommended for convenience):**
+        This step allows CMake to automatically find vcpkg without manually specifying the toolchain file for every project.
+        ```bash
+        ./vcpkg integrate install
+        ```
 
-* **Additional Dependencies:** `ws2_32.lib;cryptlib.lib;` (replace `cryptlib.lib` with your Crypto++ library name if different)
-* **Additional Library Directories:** Path to your Crypto++ `.lib` folder.
-* **Additional Include Directories:** Path to your Crypto++ header folder.
+### Building the Project
+
+1.  **Install Dependencies via Vcpkg:**
+    Navigate to your `vcpkg` directory and install the required libraries.
+    ```bash
+    cd /path/to/your/vcpkg
+    vcpkg install cryptopp boost-asio
+    ```
+    * For 64-bit builds (recommended): `vcpkg install cryptopp:x64-windows boost-asio:x64-windows` (Windows) or `vcpkg install cryptopp boost-asio` (Linux/macOS, it will default to appropriate triplet).
+    * For static linking, add `-static` to the triplet, e.g., `cryptopp:x64-windows-static`.
+
+2.  **Generate Build Files with CMake:**
+    Navigate to the root of your project (where `CMakeLists.txt` is located).
+    Create a `build` directory and run CMake from there.
+
+    ```bash
+    cd /path/to/your/project
+    mkdir build
+    cd build
+    cmake .. -DCMAKE_TOOLCHAIN_FILE=/path/to/your/vcpkg/scripts/buildsystems/vcpkg.cmake
+    ```
+    * **Note:** Replace `/path/to/your/vcpkg` with the actual path to your vcpkg installation.
+    * If you ran `vcpkg integrate install`, you might be able to omit `-DCMAKE_TOOLCHAIN_FILE` for some IDEs (like Visual Studio) or if vcpkg is in a default location. However, explicitly providing it is robust.
+
+3.  **Build the Project:**
+    After CMake has generated the build files, compile the project.
+
+    ```bash
+    cmake --build .
+    ```
+    This command will build the executables (e.g., `SIRC_Server` and `SIRC_Client` or similar, depending on your `CMakeLists.txt`).
+
+Your executables will be located in the `build` directory (or a subdirectory like `build/Debug` or `build/Release` depending on your build type and platform).
 
 ## How to Run
 
