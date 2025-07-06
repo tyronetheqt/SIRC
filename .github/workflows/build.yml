@@ -18,13 +18,11 @@ jobs:
         build_type: [Release]
         
         include:
-          # Windows (MSVC) x64 build
           - os: windows-latest
             c_compiler: cl
             cpp_compiler: cl
             vcpkg_triplet: x64-windows
 
-          # Linux (GCC/G++) x64 build
           - os: ubuntu-latest
             c_compiler: gcc
             cpp_compiler: g++
@@ -35,42 +33,38 @@ jobs:
       with:
         submodules: true
 
-    - name: Set reusable strings and vcpkg paths (Windows)
-      if: runner.os == 'Windows'
-      id: strings_windows
-      shell: pwsh
-      run: |
-        echo "build-output-dir=${{ github.workspace }}\build" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-        echo "vcpkg-root=$env:TEMP\vcpkg" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-        echo "vcpkg-toolchain-file=$env:TEMP\vcpkg\scripts\buildsystems\vcpkg.cmake" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-    - name: Set reusable strings and vcpkg paths (Linux/macOS)
-      if: runner.os != 'Windows'
-      id: strings_linux
+    - name: Set reusable strings and vcpkg paths
+      id: strings_paths
       shell: bash
       run: |
         echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
-        echo "vcpkg-root=${{ runner.temp }}/vcpkg" >> "$GITHUB_OUTPUT"
-        echo "vcpkg-toolchain-file=${{ runner.temp }}/vcpkg/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_OUTPUT"
+        
+        if [[ "${{ runner.os }}" == "Windows" ]]; then
+          echo "vcpkg-root=${{ github.workspace }}/vcpkg_install" >> "$GITHUB_OUTPUT"
+          echo "vcpkg-toolchain-file=${{ github.workspace }}/vcpkg_install/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_OUTPUT"
+        else
+          echo "vcpkg-root=${{ runner.temp }}/vcpkg" >> "$GITHUB_OUTPUT"
+          echo "vcpkg-toolchain-file=${{ runner.temp }}/vcpkg/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_OUTPUT"
+        fi
 
     - name: Install vcpkg (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        git clone https://github.com/microsoft/vcpkg.git "${{ steps.strings_windows.outputs.vcpkg-root }}"
-        & "${{ steps.strings_windows.outputs.vcpkg-root }}\bootstrap-vcpkg.bat" -disableMetrics
+        git clone https://github.com/microsoft/vcpkg.git "${{ steps.strings_paths.outputs.vcpkg-root }}"
+        & "${{ steps.strings_paths.outputs.vcpkg-root }}\bootstrap-vcpkg.bat" -disableMetrics
 
     - name: Install vcpkg (Linux/macOS)
       if: runner.os != 'Windows'
       shell: bash
       run: |
-        git clone https://github.com/microsoft/vcpkg.git "${{ steps.strings_linux.outputs.vcpkg-root }}"
-        "${{ steps.strings_linux.outputs.vcpkg-root }}/bootstrap-vcpkg.sh" -disableMetrics
+        git clone https://github.com/microsoft/vcpkg.git "${{ steps.strings_paths.outputs.vcpkg-root }}"
+        "${{ steps.strings_paths.outputs.vcpkg-root }}/bootstrap-vcpkg.sh" -disableMetrics
 
     - name: Cache vcpkg installed packages
       uses: actions/cache@v4
       with:
-        path: ${{ runner.os == 'Windows' && format('{0}/installed', steps.strings_windows.outputs.vcpkg-root) || format('{0}/installed', steps.strings_linux.outputs.vcpkg-root) }}
+        path: ${{ runner.os == 'Windows' && format('{0}/installed', steps.strings_paths.outputs.vcpkg-root) || format('{0}/installed', steps.strings_paths.outputs.vcpkg-root) }}
         key: ${{ runner.os }}-vcpkg-${{ hashFiles('vcpkg.json') || hashFiles('CMakeLists.txt') }}
         restore-keys: |
           ${{ runner.os }}-vcpkg-
@@ -79,20 +73,20 @@ jobs:
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        & "${{ steps.strings_windows.outputs.vcpkg-root }}\vcpkg.exe" install
+        & "${{ steps.strings_paths.outputs.vcpkg-root }}\vcpkg.exe" install
 
     - name: Install dependencies via vcpkg (Linux/macOS)
       if: runner.os != 'Windows'
       shell: bash
       run: |
-        "${{ steps.strings_linux.outputs.vcpkg-root }}/vcpkg" install
+        "${{ steps.strings_paths.outputs.vcpkg-root }}/vcpkg" install
 
     - name: Configure CMake (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        cmake -B "${{ steps.strings_windows.outputs.build-output-dir }}" `
-              -DCMAKE_TOOLCHAIN_FILE="${{ steps.strings_windows.outputs.vcpkg-toolchain-file }}" `
+        cmake -B "${{ steps.strings_paths.outputs.build-output-dir }}" `
+              -DCMAKE_TOOLCHAIN_FILE="${{ steps.strings_paths.outputs.vcpkg-toolchain-file }}" `
               -DCMAKE_CXX_COMPILER="${{ matrix.cpp_compiler }}" `
               -DCMAKE_C_COMPILER="${{ matrix.c_compiler }}" `
               -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" `
@@ -104,8 +98,8 @@ jobs:
       if: runner.os != 'Windows'
       shell: bash
       run: |
-        cmake -B ${{ steps.strings_linux.outputs.build-output-dir }} \
-              -DCMAKE_TOOLCHAIN_FILE=${{ steps.strings_linux.outputs.vcpkg-toolchain-file }} \
+        cmake -B ${{ steps.strings_paths.outputs.build-output-dir }} \
+              -DCMAKE_TOOLCHAIN_FILE=${{ steps.strings_paths.outputs.vcpkg-toolchain-file }} \
               -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }} \
               -DCMAKE_C_COMPILER=${{ matrix.c_compiler }} \
               -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
@@ -115,21 +109,37 @@ jobs:
     - name: Build (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
-      run: cmake --build ${{ steps.strings_windows.outputs.build-output-dir }} --config ${{ matrix.build_type }}
+      run: cmake --build ${{ steps.strings_paths.outputs.build-output-dir }} --config ${{ matrix.build_type }}
+
+    - name: Upload Windows Binaries
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: compiled-binaries-windows-${{ matrix.build_type }}
+        path: |
+          ${{ steps.strings_paths.outputs.build-output-dir }}\${{ matrix.build_type }}\SIRC.exe
 
     - name: Build (Linux/macOS)
       if: runner.os != 'Windows'
       shell: bash
-      run: cmake --build ${{ steps.strings_linux.outputs.build-output-dir }} --config ${{ matrix.build_type }}
+      run: cmake --build ${{ steps.strings_paths.outputs.build-output-dir }} --config ${{ matrix.build_type }}
+
+    - name: Upload Linux Binaries
+      if: runner.os != 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: compiled-binaries-linux-${{ matrix.build_type }}
+        path: |
+          ${{ steps.strings_paths.outputs.build-output-dir }}/SIRC
 
     - name: Test (Windows)
       if: runner.os == 'Windows'
-      working-directory: ${{ steps.strings_windows.outputs.build-output-dir }}
+      working-directory: ${{ steps.strings_paths.outputs.build-output-dir }}
       shell: pwsh
       run: ctest --build-config ${{ matrix.build_type }}
 
     - name: Test (Linux/macOS)
       if: runner.os != 'Windows'
-      working-directory: ${{ steps.strings_linux.outputs.build-output-dir }}
+      working-directory: ${{ steps.strings_paths.outputs.build-output-dir }}
       shell: bash
       run: ctest --build-config ${{ matrix.build_type }}
