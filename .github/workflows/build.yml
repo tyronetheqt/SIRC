@@ -35,44 +35,44 @@ jobs:
       with:
         submodules: true
 
-    - name: Set reusable strings and vcpkg paths
-      id: strings
-      # Use pwsh for Windows, bash for others to correctly interpret environment variables
-      shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
+    - name: Set reusable strings and vcpkg paths (Windows)
+      if: runner.os == 'Windows'
+      id: strings_windows
+      shell: pwsh
       run: |
-        if ("${{ runner.os }}" == "Windows") {
-          # PowerShell syntax for setting output variables
-          Write-Output "build-output-dir=${{ github.workspace }}\build"
-          Write-Output "vcpkg-root=$env:TEMP\vcpkg"
-          Write-Output "vcpkg-toolchain-file=$env:TEMP\vcpkg\scripts\buildsystems\vcpkg.cmake"
-        } else {
-          # Bash syntax for setting output variables
-          echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
-          echo "vcpkg-root=${{ runner.temp }}/vcpkg" >> "$GITHUB_OUTPUT"
-          echo "vcpkg-toolchain-file=${{ runner.temp }}/vcpkg/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_OUTPUT"
-        }
+        Write-Output "build-output-dir=${{ github.workspace }}\build"
+        Write-Output "vcpkg-root=$env:TEMP\vcpkg"
+        Write-Output "vcpkg-toolchain-file=$env:TEMP\vcpkg\scripts\buildsystems\vcpkg.cmake"
+
+    - name: Set reusable strings and vcpkg paths (Linux/macOS)
+      if: runner.os != 'Windows'
+      id: strings_linux
+      shell: bash
+      run: |
+        echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+        echo "vcpkg-root=${{ runner.temp }}/vcpkg" >> "$GITHUB_OUTPUT"
+        echo "vcpkg-toolchain-file=${{ runner.temp }}/vcpkg/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_OUTPUT"
 
     - name: Install vcpkg (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        git clone https://github.com/microsoft/vcpkg.git "${{ steps.strings.outputs.vcpkg-root }}"
-        # Use '&' call operator for .bat files when arguments are present
-        & "${{ steps.strings.outputs.vcpkg-root }}\bootstrap-vcpkg.bat" -disableMetrics
+        git clone https://github.com/microsoft/vcpkg.git "${{ steps.strings_windows.outputs.vcpkg-root }}"
+        & "${{ steps.strings_windows.outputs.vcpkg-root }}\bootstrap-vcpkg.bat" -disableMetrics
 
     - name: Install vcpkg (Linux/macOS)
       if: runner.os != 'Windows'
       shell: bash
       run: |
-        git clone https://github.com/microsoft/vcpkg.git "${{ steps.strings.outputs.vcpkg-root }}"
-        "${{ steps.strings.outputs.vcpkg-root }}/bootstrap-vcpkg.sh" -disableMetrics
+        git clone https://github.com/microsoft/vcpkg.git "${{ steps.strings_linux.outputs.vcpkg-root }}"
+        "${{ steps.strings_linux.outputs.vcpkg-root }}/bootstrap-vcpkg.sh" -disableMetrics
 
     - name: Cache vcpkg installed packages
       uses: actions/cache@v4
       with:
         # Use a conditional path to match the OS-specific vcpkg installation location
         # Paths for cache should generally use forward slashes for consistency
-        path: ${{ runner.os == 'Windows' && format('{0}/installed', steps.strings.outputs.vcpkg-root) || format('{0}/installed', steps.strings.outputs.vcpkg-root) }}
+        path: ${{ runner.os == 'Windows' && format('{0}/installed', steps.strings_windows.outputs.vcpkg-root) || format('{0}/installed', steps.strings_linux.outputs.vcpkg-root) }}
         key: ${{ runner.os }}-vcpkg-${{ hashFiles('vcpkg.json') || hashFiles('CMakeLists.txt') }}
         restore-keys: |
           ${{ runner.os }}-vcpkg-
@@ -82,21 +82,21 @@ jobs:
       shell: pwsh
       run: |
         # In manifest mode, just run 'vcpkg install' without package arguments
-        & "${{ steps.strings.outputs.vcpkg-root }}\vcpkg.exe" install
+        & "${{ steps.strings_windows.outputs.vcpkg-root }}\vcpkg.exe" install
 
     - name: Install dependencies via vcpkg (Linux/macOS)
       if: runner.os != 'Windows'
       shell: bash
       run: |
         # In manifest mode, just run 'vcpkg install' without package arguments
-        "${{ steps.strings.outputs.vcpkg-root }}/vcpkg" install
+        "${{ steps.strings_linux.outputs.vcpkg-root }}/vcpkg" install
 
     - name: Configure CMake (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        cmake -B "${{ steps.strings.outputs.build-output-dir }}" `
-              -DCMAKE_TOOLCHAIN_FILE="${{ steps.strings.outputs.vcpkg-toolchain-file }}" `
+        cmake -B "${{ steps.strings_windows.outputs.build-output-dir }}" `
+              -DCMAKE_TOOLCHAIN_FILE="${{ steps.strings_windows.outputs.vcpkg-toolchain-file }}" `
               -DCMAKE_CXX_COMPILER="${{ matrix.cpp_compiler }}" `
               -DCMAKE_C_COMPILER="${{ matrix.c_compiler }}" `
               -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" `
@@ -108,8 +108,8 @@ jobs:
       if: runner.os != 'Windows'
       shell: bash
       run: |
-        cmake -B ${{ steps.strings.outputs.build-output-dir }} \
-              -DCMAKE_TOOLCHAIN_FILE=${{ steps.strings.outputs.vcpkg-toolchain-file }} \
+        cmake -B ${{ steps.strings_linux.outputs.build-output-dir }} \
+              -DCMAKE_TOOLCHAIN_FILE=${{ steps.strings_linux.outputs.vcpkg-toolchain-file }} \
               -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }} \
               -DCMAKE_C_COMPILER=${{ matrix.c_compiler }} \
               -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
@@ -119,21 +119,21 @@ jobs:
     - name: Build (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
-      run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }}
+      run: cmake --build ${{ steps.strings_windows.outputs.build-output-dir }} --config ${{ matrix.build_type }}
 
     - name: Build (Linux/macOS)
       if: runner.os != 'Windows'
       shell: bash
-      run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }}
+      run: cmake --build ${{ steps.strings_linux.outputs.build-output-dir }} --config ${{ matrix.build_type }}
 
     - name: Test (Windows)
       if: runner.os == 'Windows'
-      working-directory: ${{ steps.strings.outputs.build-output-dir }}
+      working-directory: ${{ steps.strings_windows.outputs.build-output-dir }}
       shell: pwsh
       run: ctest --build-config ${{ matrix.build_type }}
 
     - name: Test (Linux/macOS)
       if: runner.os != 'Windows'
-      working-directory: ${{ steps.strings.outputs.build-output-dir }}
+      working-directory: ${{ steps.strings_linux.outputs.build-output-dir }}
       shell: bash
       run: ctest --build-config ${{ matrix.build_type }}
