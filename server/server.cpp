@@ -254,7 +254,7 @@ void handleClient(std::shared_ptr<tcp::socket> clientSocketPtr) {
             }
         }
 
-        std::string ackMessage = "Welcome, " + clientUsername + "! Type /CMDS for commands. Join a channel with /JOIN <channel_name>.";
+        std::string ackMessage = "Welcome, " + clientUsername + "! Type CMDS for commands. Join a channel with JOIN <channel_name>.";
         std::vector<unsigned char> ackBytes(ackMessage.begin(), ackMessage.end());
         std::vector<unsigned char> encryptedAck = clientAesCipher->encrypt(ackBytes);
 
@@ -923,7 +923,7 @@ int runServer(int port) {
         asio::io_context io_context;
         tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), port));
 
-        print_to_console(std::string("server: Listening on port ") + std::to_string(port) + "...");
+        print_to_console(std::string("Server: Listening on port ") + std::to_string(port) + "...");
 
         while (true) {
             std::shared_ptr<tcp::socket> socket_ptr = std::make_shared<tcp::socket>(io_context);
@@ -933,7 +933,7 @@ int runServer(int port) {
         }
     }
     catch (const boost::system::system_error& e) {
-        print_to_console(std::string("server: Error: ") + e.what());
+        print_to_console(std::string("Server: Error: ") + e.what());
         return 1;
     }
     return 0;

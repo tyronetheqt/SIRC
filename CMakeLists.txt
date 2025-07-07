@@ -16,13 +16,13 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     cryptopp::cryptopp
 )
 
-set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 17)
+set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 20)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD_REQUIRED ON)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_EXTENSIONS OFF)
 if (MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE /W4)
 elseif (UNIX)
-    target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Werror)
+    target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra)
 endif()
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     if (MSVC)

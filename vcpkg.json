@@ -1,9 +1,9 @@
 {
+  "builtin-baseline": "38f731e8477085731b8160010c2e6467000e000e",
   "dependencies": [
-    "cryptopp",
     "boost-asio",
+    "boost-cmake",
     "boost-system",
-    "boost-cmake"
-  ],
-  "builtin-baseline": "38f731e8477085731b8160010c2e6467000e000e"
+    "cryptopp"
+  ]
 }

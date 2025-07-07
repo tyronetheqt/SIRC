@@ -46,7 +46,7 @@ const int port = 12345;
 
 constexpr size_t BUF_SIZE = 4096;
 
-constexpr uint32_t MAX_MESSAGE_SIZE = 10 * 1024 * 1024;
+constexpr uint32_t MAX_MESSAGE_SIZE = 1024 * 1024;
 
 const int GCM_TAG_SIZE = 16;
 
